@@ -1,0 +1,88 @@
+{
+    "namespace": "MediaPlayer",
+    "components": [
+        {
+            "type": "video_player",
+            "element": "NativePHP\\MediaPlayer\\Elements\\VideoPlayer",
+            "blade": "NativePHP\\MediaPlayer\\Components\\VideoPlayer",
+            "android_renderer": "com.nativephp.plugins.media_player.ui.VideoPlayerRenderer",
+            "ios_renderer": "MediaPlayerVideoRenderer",
+            "self_closing": true
+        }
+    ],
+    "bridge_functions": [
+        {
+            "name": "MediaPlayer.Play",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Play",
+            "ios": "MediaPlayerFunctions.Play",
+            "description": "Start or replace playback of a file path or URL on the shared player"
+        },
+        {
+            "name": "MediaPlayer.Pause",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Pause",
+            "ios": "MediaPlayerFunctions.Pause",
+            "description": "Pause the current playback"
+        },
+        {
+            "name": "MediaPlayer.Resume",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Resume",
+            "ios": "MediaPlayerFunctions.Resume",
+            "description": "Resume paused playback"
+        },
+        {
+            "name": "MediaPlayer.Stop",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Stop",
+            "ios": "MediaPlayerFunctions.Stop",
+            "description": "Stop playback and release the shared player"
+        },
+        {
+            "name": "MediaPlayer.Seek",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Seek",
+            "ios": "MediaPlayerFunctions.Seek",
+            "description": "Seek to a position in seconds"
+        },
+        {
+            "name": "MediaPlayer.SetVolume",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.SetVolume",
+            "ios": "MediaPlayerFunctions.SetVolume",
+            "description": "Set playback volume (0.0 - 1.0)"
+        },
+        {
+            "name": "MediaPlayer.GetStatus",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.GetStatus",
+            "ios": "MediaPlayerFunctions.GetStatus",
+            "description": "Get current playback state, position, duration and source"
+        },
+        {
+            "name": "MediaPlayer.Present",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.Present",
+            "ios": "MediaPlayerFunctions.Present",
+            "description": "Present a full-screen system player for a file path or URL"
+        }
+    ],
+    "android": {
+        "min_version": 26,
+        "activities": [
+            {
+                "name": "com.nativephp.plugins.media_player.FullscreenPlayerActivity",
+                "theme": "@style/Theme.AppCompat.NoActionBar",
+                "configChanges": "orientation|screenSize|keyboardHidden"
+            }
+        ],
+        "dependencies": {
+            "implementation": []
+        }
+    },
+    "ios": {
+        "min_version": "16.0",
+        "info_plist": {},
+        "dependencies": {
+            "swift_packages": [],
+            "pods": []
+        }
+    },
+    "events": [
+        "NativePHP\\MediaPlayer\\Events\\PlaybackEnded",
+        "NativePHP\\MediaPlayer\\Events\\PlaybackError"
+    ]
+}
