@@ -11,14 +11,20 @@
     ],
     "require": {
         "php": "^8.2",
-        "nativephp/mobile": "*"
+        "nativephp/mobile": "^3.0 || ^4.0"
     },
     "require-dev": {
-        "pestphp/pest": "^3.0"
+        "orchestra/testbench": "^10.0",
+        "pestphp/pest": "^2.7|^3.0|^4.0"
     },
     "autoload": {
         "psr-4": {
             "NativePHP\\MediaPlayer\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
         }
     },
     "extra": {
