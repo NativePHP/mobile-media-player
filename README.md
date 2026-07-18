@@ -139,6 +139,50 @@ public function handlePlaybackError(string $source, string $message)
 
 `MediaPlayer::getStatus()['state']` is one of: `idle`, `playing`, `paused`.
 
+## Testing
+
+The plugin extends the NativePHP testing suite with playback-specific helpers, so your app tests can fake and assert media activity without knowing any bridge internals:
+
+```php
+use Native\Mobile\Testing\Native;
+
+it('plays the selected track', function () {
+    Native::fakeBridge();
+
+    Native::test(NowPlaying::class)
+        ->tap('Play')
+        ->assertPlayed('https://example.com/stream.mp3');
+});
+
+it('shows where playback is', function () {
+    Native::fakeBridge()->withPlaybackStatus('playing', position: 12.0, duration: 180.0);
+
+    Native::test(NowPlaying::class)
+        ->call('refresh')
+        ->assertSee('0:12 / 3:00');
+});
+
+it('pauses, seeks, and stops', function () {
+    Native::fakeBridge();
+
+    Native::test(NowPlaying::class)
+        ->tap('Pause')->assertPaused()
+        ->tap('Skip forward')->assertSeeked(30.0)
+        ->tap('Stop')->assertStopped();
+});
+```
+
+### Helpers
+
+- `withPlaybackStatus(string $state = 'playing', float $position = 0.0, float $duration = 0.0, ?string $source = null)` — script the status `getStatus()` reports. `$state` is one of `idle`, `playing`, `paused`.
+- `assertPlayed(?string $source = null)` — assert playback was started, or exactly `$source` (a path or URL) when given.
+- `assertPaused()` — assert playback was paused.
+- `assertStopped()` — assert playback was stopped and the player released.
+- `assertSeeked(?float $to = null)` — assert a seek happened, or to exactly `$to` seconds when given.
+- `assertNothingPlayed()` — assert no playback was started.
+
+The helpers are available on `Native::fakeBridge()` and chain directly off `Native::test(...)`. They register automatically while running tests (requires a core with a macroable FakeBridge; on older cores they simply don't register).
+
 ## Platform Support
 
 - **iOS:** 16.0+ (AVPlayer / AVKit)
