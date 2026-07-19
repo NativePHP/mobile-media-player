@@ -13,8 +13,9 @@ use Native\Mobile\Testing\FakeBridge;
 use Native\Mobile\Testing\Native;
 use NativePHP\MediaPlayer\MediaPlayer;
 use PHPUnit\Framework\AssertionFailedError;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class);
+uses(TestCase::class);
 
 beforeEach(function () {
     if (! method_exists(FakeBridge::class, 'macro')) {
