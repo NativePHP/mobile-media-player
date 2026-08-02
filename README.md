@@ -53,6 +53,50 @@ $status = MediaPlayer::getStatus();
 `play()` and `present()` return `false` when the source can't be started (or when
 running outside the native runtime).
 
+### Now Playing (lock screen, Control Center, Dynamic Island)
+
+Pass `title`, `artist` and `artwork` to `play()` to populate the system's Now
+Playing display and enable its transport controls:
+
+```php
+MediaPlayer::play('https://example.com/live.m3u8', [
+    'title' => 'The Platform',
+    'artist' => 'Live stream',
+    'artwork' => 'https://example.com/logo.png', // remote URL or local path
+]);
+```
+
+Remote artwork is fetched in the background and applied when it arrives, so
+playback never waits on it. Omit any key to leave it unset.
+
+#### Background audio is the app's decision
+
+The plugin does **not** declare the `audio` background mode, because Apple
+rejects apps that claim a background mode they don't use — a video-only app must
+not inherit it. Audio stops when your app is backgrounded until you opt in, in
+your own app's `config/nativephp.php`:
+
+```php
+'permissions' => [
+    'UIBackgroundModes' => ['audio'],
+],
+```
+
+> Note that the iOS **simulator** keeps playing audio in the background whether
+> or not you declare this. Verify on a physical device.
+
+#### Live streams
+
+A source whose duration is not finite is published as a live stream, which makes
+iOS render a "LIVE" badge with no scrubber. Two consequences worth knowing:
+
+- The system shows a **stop** button rather than pause/play, so a live halt
+  arrives as `RemoteCommand('stop')` — `pause` is never reported for live audio.
+- Stopping from the lock screen releases the player (a live buffer is stale the
+  moment it stops) but keeps the Now Playing card, so the user can start again
+  from the lock screen. Pressing play rejoins at the live edge rather than
+  resuming a stale buffer.
+
 ### Full-screen system player
 
 ```php
@@ -134,6 +178,30 @@ public function handlePlaybackError(string $source, string $message)
     $this->status = "Playback failed: {$message}";
 }
 ```
+
+### `RemoteCommand`
+
+Fired when the user drives playback from outside the app — the lock screen,
+Control Center, the Dynamic Island, headphone controls or CarPlay.
+
+The native side has already applied the command to the shared player by the time
+this reaches PHP, so handlers exist to reconcile your UI, not to perform the
+action.
+
+**Payload:** `string $command` (`play`, `pause` or `stop`), `string $source`
+
+```php
+use Native\Mobile\Attributes\On;
+use NativePHP\MediaPlayer\Events\RemoteCommand;
+
+#[On(RemoteCommand::class)]
+public function handleRemoteCommand(string $command, string $source)
+{
+    $this->playing = $command === 'play';
+}
+```
+
+Live streams never report `pause` — see [Live streams](#live-streams).
 
 ## Status values
 
