@@ -1,6 +1,6 @@
 # Media Player Plugin for NativePHP Mobile
 
-Audio/video playback for NativePHP Mobile: a shared background player driven from PHP, a full-screen system player, and an inline `<video-player>` element for native (Edge) views.
+Audio/video playback for NativePHP Mobile: a shared background player driven from PHP, a full-screen system player, and inline `<video-player>` and `<animated-image>` elements for native (Edge) views.
 
 ## Overview
 
@@ -9,6 +9,7 @@ The plugin provides three ways to play media:
 - **Shared player** — `MediaPlayer::play()` plays audio or video sources app-wide (AVPlayer on iOS, MediaPlayer on Android) with pause/resume/seek/volume control from PHP.
 - **Full-screen presentation** — `MediaPlayer::present()` opens the system player UI (AVPlayerViewController on iOS, a dedicated full-screen activity on Android); the user dismisses it natively.
 - **Inline `<video-player>` element** — a video surface for native UI views, rendered as SwiftUI `VideoPlayer` (AVKit) on iOS and a `VideoView` inside Compose on Android.
+- **Inline `<animated-image>` element** — animated GIF / APNG / WebP, rendered through ImageIO on iOS and Coil's animated decoder on Android. Costs no playback session, so a list can hold many at once.
 
 ## Installation
 
@@ -83,13 +84,37 @@ and drive playback through the `MediaPlayer` facade:
 ```blade
 <stack class="w-full aspect-video">
     <video-player :src="$src" :controls="false" autoplay muted class="w-full h-full"/>
-    <button @press="togglePlayback" icon="pause.fill" class="absolute bottom-2 right-2"/>
+    <button @tap="togglePlayback" icon="pause.fill" class="absolute bottom-2 right-2"/>
 </stack>
 ```
 
-### Building the element from PHP
+### Animated images in native views
+
+Core's `image` element shows only the first frame of an animated file — SwiftUI's
+`AsyncImage` and Coil's default decoders both stop there. `<animated-image>` animates it:
+
+```blade
+<animated-image :src="$gif['url']" :fit="2" alt="{{ $gif['title'] }}" class="w-full h-48 rounded-2xl"/>
+```
+
+| Attribute | Default | Notes |
+|---|---|---|
+| `src` | — | URL or local path (GIF, APNG, animated WebP) |
+| `fit` | `1` | Same mapping as `image`: 0/1 fit, 2 fill and crop, 3 stretch |
+| `alt` | — | Labelled images are meaningful to screen readers; unlabelled ones stay decorative |
+| `autoplay` | `true` | When false, renders the still first frame |
+| `loop` | `true` | iOS only — Android honours the loop count baked into the file |
+
+**Reach for this rather than `video-player` whenever several animations share a
+screen.** Playback surfaces are scarce: iOS shares a single `AVPlayer`, so a second
+`video-player` tears the first one down, and Android runs out of hardware decoders
+after a handful. Animated images decode to ordinary bitmaps and have no such ceiling.
+Use `video-player` for video with audio and transport controls.
+
+### Building the elements from PHP
 
 ```php
+use NativePHP\MediaPlayer\Elements\AnimatedImage;
 use NativePHP\MediaPlayer\Elements\VideoPlayer;
 
 VideoPlayer::make($path)
@@ -97,6 +122,11 @@ VideoPlayer::make($path)
     ->autoplay()
     ->loop()
     ->muted();
+
+AnimatedImage::make($url)
+    ->fit(2)
+    ->alt('A dancing cat')
+    ->loop();
 ```
 
 ## Events
@@ -185,12 +215,15 @@ The helpers are available on `Native::fakeBridge()` and chain directly off `Nati
 
 ## Platform Support
 
-- **iOS:** 16.0+ (AVPlayer / AVKit)
-- **Android:** API 26+ (MediaPlayer / Media3 UI)
+- **iOS:** 16.0+ (AVPlayer / AVKit; ImageIO for `animated-image`)
+- **Android:** API 26+ (MediaPlayer / Media3 UI; Coil `AnimatedImageDecoder` on API 28+, `GifDecoder` below)
 
 ## Notes
 
-- One shared player: calling `play()` replaces whatever is currently playing.
+- One shared player: calling `play()` replaces whatever is currently playing. This
+  applies to `<video-player>` too — only one video surface can play at a time, which
+  is why `<animated-image>` exists for looping imagery in lists.
+- Both elements render on the web target as `<video>` and `<img>` respectively.
 - Remote URLs require network access; local paths must be readable by the app
   (e.g. `storage_path()` or bundled assets).
 - No runtime permissions are required.
