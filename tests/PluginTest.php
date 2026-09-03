@@ -75,6 +75,16 @@ describe('Plugin Manifest', function () {
 
         expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\PlaybackEnded');
         expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\PlaybackError');
+        expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\RemoteCommand');
+    });
+
+    it('leaves the audio background mode to the consuming app', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        // Declaring UIBackgroundModes here would force it on every consumer,
+        // and Apple rejects apps that claim a background mode they don't use.
+        // A video-only app must not inherit background audio from this plugin.
+        expect($manifest['ios']['background_modes'] ?? [])->not->toContain('audio');
     });
 });
 
@@ -134,6 +144,11 @@ describe('PHP Classes', function () {
 
     it('has PlaybackError event', function () {
         $file = $this->pluginPath.'/src/Events/PlaybackError.php';
+        expect(file_exists($file))->toBeTrue();
+    });
+
+    it('has RemoteCommand event', function () {
+        $file = $this->pluginPath.'/src/Events/RemoteCommand.php';
         expect(file_exists($file))->toBeTrue();
     });
 });

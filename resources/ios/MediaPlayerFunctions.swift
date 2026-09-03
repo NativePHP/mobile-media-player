@@ -30,13 +30,26 @@ enum MediaPlayerFunctions {
             let loop = parameters["loop"] as? Bool ?? false
             let volume = (parameters["volume"] as? NSNumber)?.floatValue ?? 1.0
 
+            // Optional now-playing metadata for the lock screen, Control
+            // Center and Dynamic Island.
+            let title = parameters["title"] as? String
+            let artist = parameters["artist"] as? String
+            let artwork = parameters["artwork"] as? String
+
             print("🎬 Starting media playback: \(source)")
 
             var success = false
             let semaphore = DispatchSemaphore(value: 0)
 
             DispatchQueue.main.async {
-                success = MediaPlayerManager.shared.play(source: source, loop: loop, volume: volume)
+                success = MediaPlayerManager.shared.play(
+                    source: source,
+                    loop: loop,
+                    volume: volume,
+                    title: title,
+                    artist: artist,
+                    artwork: artwork
+                )
                 semaphore.signal()
             }
 

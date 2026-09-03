@@ -7,16 +7,25 @@ class MediaPlayer
     /**
      * Start (or replace) playback of a file path or URL on the shared player.
      *
-     * @param  array{loop?: bool, volume?: float}  $options
+     * `title`, `artist` and `artwork` populate the system's Now Playing
+     * display — the lock screen, Control Center and the Dynamic Island — and
+     * enable its transport controls. `artwork` may be a remote URL or a local
+     * file path; remote artwork is fetched in the background and applied when
+     * it arrives, so playback never waits on it.
+     *
+     * @param  array{loop?: bool, volume?: float, title?: string, artist?: string, artwork?: string}  $options
      */
     public function play(string $source, array $options = []): bool
     {
         if (function_exists('nativephp_call')) {
-            $result = nativephp_call('MediaPlayer.Play', json_encode([
+            $result = nativephp_call('MediaPlayer.Play', json_encode(array_filter([
                 'source' => $source,
                 'loop' => (bool) ($options['loop'] ?? false),
                 'volume' => (float) ($options['volume'] ?? 1.0),
-            ]));
+                'title' => $options['title'] ?? null,
+                'artist' => $options['artist'] ?? null,
+                'artwork' => $options['artwork'] ?? null,
+            ], fn ($value) => $value !== null)));
 
             if ($result) {
                 $decoded = json_decode($result, true);
