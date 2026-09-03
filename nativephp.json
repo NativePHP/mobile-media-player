@@ -8,6 +8,14 @@
             "android_renderer": "com.nativephp.plugins.media_player.ui.VideoPlayerRenderer",
             "ios_renderer": "MediaPlayerVideoRenderer",
             "self_closing": true
+        },
+        {
+            "type": "animated_image",
+            "element": "NativePHP\\MediaPlayer\\Elements\\AnimatedImage",
+            "blade": "NativePHP\\MediaPlayer\\Components\\AnimatedImage",
+            "android_renderer": "com.nativephp.plugins.media_player.ui.AnimatedImageRenderer",
+            "ios_renderer": "MediaPlayerAnimatedImageRenderer",
+            "self_closing": true
         }
     ],
     "bridge_functions": [
@@ -70,7 +78,9 @@
             }
         ],
         "dependencies": {
-            "implementation": []
+            "implementation": [
+                "io.coil-kt.coil3:coil-gif:3.1.0"
+            ]
         }
     },
     "ios": {
