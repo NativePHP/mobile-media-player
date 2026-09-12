@@ -6,9 +6,14 @@ import android.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.fragment.app.FragmentActivity
@@ -19,8 +24,8 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import com.nativephp.mobile.ui.nativerender.LocalReelPageActive
 import com.nativephp.mobile.ui.nativerender.NativeUINode
 import com.nativephp.plugins.media_player.MediaPlayerManager
 
@@ -33,15 +38,15 @@ import com.nativephp.plugins.media_player.MediaPlayerManager
  * incoming `modifier` carries the element's layout (width / height /
  * aspect) resolved by core, so the renderer only draws the surface.
  *
- * Inside a paged container (mobile-ui's `reel`) `LocalReelPageActive`
- * is non-null: the visible page plays, its pre-composed neighbours stay
- * prepared (first frame + initial buffer ready) but paused and rewound,
- * so a swipe lands on video that starts instantly. Outside a pager the
- * local is null and `autoplay` alone decides.
+ * Each surface is prepared as soon as it is composed so a page that
+ * scrolls in starts instantly. `autoplay` means "play while mostly on
+ * screen": the surface watches its own window bounds and pauses (and
+ * rewinds) when it drops below half visible, playing again when it comes
+ * back — a feed pager needs no coordination, and nothing in core mediates.
  *
- * The playing (or, outside a pager, the only) surface is adopted by
- * `MediaPlayerManager`, so the PHP `MediaPlayer` facade drives it and
- * PlaybackEnded / PlaybackError fire for element playback too.
+ * The playing surface is adopted by `MediaPlayerManager`, so the PHP
+ * `MediaPlayer` facade drives it and PlaybackEnded / PlaybackError fire
+ * for element playback too.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 object VideoPlayerRenderer {
@@ -53,12 +58,17 @@ object VideoPlayerRenderer {
         val autoplay = p.getBool("autoplay")
         val loop = p.getBool("loop")
         val muted = p.getBool("muted")
+        // 1 contain (default), 2 cover, 3 fill — the Image `fit` contract.
+        val resizeMode = when (p.getInt("fit", 1)) {
+            2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            3 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
 
         if (src.isEmpty()) {
             return
         }
 
-        val pageActive = LocalReelPageActive.current
         val context = LocalContext.current
         val activity = remember(context) { findActivity(context) }
         val currentSrc = rememberUpdatedState(src)
@@ -113,11 +123,12 @@ object VideoPlayerRenderer {
             player.volume = if (muted) 0f else 1f
         }
 
-        // null  → not in a pager: autoplay decides.
-        // true  → the settled page: adopt + honour autoplay.
-        // false → a pre-composed neighbour: stay prepared, paused, at 0.
-        LaunchedEffect(player, src, pageActive, autoplay) {
-            if (pageActive == false) {
+        // Mostly on screen → adopt (the facade drives this surface) and
+        // honour autoplay. Off screen (a pre-composed pager neighbour, a
+        // row scrolled away) → let go, pause, rewind so it starts clean.
+        var visible by remember { mutableStateOf(true) }
+        LaunchedEffect(player, src, visible, autoplay) {
+            if (!visible) {
                 player.pause()
                 player.seekTo(0)
                 MediaPlayerManager.releaseElementPlayback(player)
@@ -134,17 +145,25 @@ object VideoPlayerRenderer {
         }
 
         AndroidView(
-            modifier = modifier,
+            modifier = modifier.onGloballyPositioned { coords ->
+                val size = coords.size
+                if (size.width <= 0 || size.height <= 0) return@onGloballyPositioned
+                val shown = coords.boundsInWindow()
+                val fraction = (shown.width * shown.height) / (size.width.toFloat() * size.height.toFloat())
+                visible = fraction >= 0.5f
+            },
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = controls
                     setShutterBackgroundColor(Color.BLACK)
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                    this.resizeMode = resizeMode
                     this.player = player
                 }
             },
             update = { view ->
                 view.useController = controls
+                view.resizeMode = resizeMode
                 if (view.player !== player) {
                     view.player = player
                 }

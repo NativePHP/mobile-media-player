@@ -9,19 +9,20 @@ import SwiftUI
 /// Layout (width / height / aspect) is applied by core's `NodeView` modifier
 /// stack around this view, so the renderer only draws the video surface.
 ///
-/// Outside a paged container the surface adopts the shared
-/// `MediaPlayerManager` player for its source, so the PHP `MediaPlayer`
-/// facade drives on-screen playback and PlaybackEnded / PlaybackError fire
-/// for element playback too.
+/// Each surface owns its `AVPlayer`, loaded as soon as the surface exists so
+/// a page that scrolls in starts instantly. `autoplay` means "play while
+/// mostly on screen": inside a scroll view the surface pauses (and rewinds)
+/// when it drops below half visible and plays again when it comes back —
+/// a feed pager needs no coordination, and nothing in core mediates.
+/// Outside a scroll view the visibility hook never fires and the surface
+/// counts as visible.
 ///
-/// Inside one (mobile-ui's `reel`) `\.reelPageActive` is non-nil and the
-/// surface owns its own `AVPlayer`: the visible page's player is adopted by
-/// the manager and plays, while pre-rendered neighbours stay loaded but
-/// paused at the start so a swipe lands on video that starts instantly.
+/// The playing surface is adopted by `MediaPlayerManager`, so the PHP
+/// `MediaPlayer` facade drives on-screen playback and PlaybackEnded /
+/// PlaybackError fire for element playback too.
 struct MediaPlayerVideoRenderer: View {
     let node: NativeUINode
 
-    @Environment(\.reelPageActive) private var pageActive: Bool?
     @StateObject private var model = MediaPlayerSurfaceModel()
 
     var body: some View {
@@ -31,6 +32,8 @@ struct MediaPlayerVideoRenderer: View {
         let autoplay = p.getBool("autoplay")
         let loop = p.getBool("loop")
         let muted = p.getBool("muted")
+        // 1 contain (default), 2 cover, 3 fill — the Image `fit` contract.
+        let fit = p.getInt("fit", default: 1)
 
         Group {
             if let player = model.player {
@@ -39,17 +42,30 @@ struct MediaPlayerVideoRenderer: View {
                 } else {
                     // Bare surface — no transport chrome. Developers overlay
                     // their own Element UI and drive playback via the facade.
-                    MediaPlayerBareSurface(player: player)
+                    MediaPlayerBareSurface(player: player, gravity: Self.gravity(for: fit))
                 }
             } else {
                 Color.black
             }
         }
-        .task(id: "\(src)|\(String(describing: pageActive))|\(autoplay)|\(loop)|\(muted)") {
-            model.sync(src: src, pageActive: pageActive, autoplay: autoplay, loop: loop, muted: muted)
+        .task(id: "\(src)|\(autoplay)|\(loop)|\(muted)") {
+            model.sync(src: src, autoplay: autoplay, loop: loop, muted: muted)
+        }
+        .onScrollVisibilityChange(threshold: 0.5) { visible in
+            model.setVisible(visible)
         }
         .onDisappear {
             model.surfaceGone()
+        }
+    }
+}
+
+extension MediaPlayerVideoRenderer {
+    static func gravity(for fit: Int) -> AVLayerVideoGravity {
+        switch fit {
+        case 2: return .resizeAspectFill
+        case 3: return .resize
+        default: return .resizeAspect
         }
     }
 }
@@ -59,69 +75,55 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
     @Published var player: AVPlayer?
 
     private var configuredSource: String = ""
-    /// Player this surface owns while inside a paged container.
-    private var ownPlayer: AVPlayer?
+    private var autoplay = false
+    private var loop = false
+    /// Visible until a scroll view says otherwise.
+    private var visible = true
 
-    func sync(src: String, pageActive: Bool?, autoplay: Bool, loop: Bool, muted: Bool) {
+    func sync(src: String, autoplay: Bool, loop: Bool, muted: Bool) {
         guard !src.isEmpty else { return }
 
-        guard let active = pageActive else {
-            syncShared(src: src, autoplay: autoplay, loop: loop, muted: muted)
-            return
-        }
+        self.autoplay = autoplay
+        self.loop = loop
 
-        syncPaged(src: src, active: active, autoplay: autoplay, loop: loop, muted: muted)
-    }
-
-    /// Not in a pager: the shared manager player, re-configured only when
-    /// the source changes.
-    private func syncShared(src: String, autoplay: Bool, loop: Bool, muted: Bool) {
-        if let own = ownPlayer {
-            MediaPlayerManager.shared.release(player: own)
-            ownPlayer = nil
-        }
-
-        guard src != configuredSource else { return }
-
-        configuredSource = src
-        player = MediaPlayerManager.shared.preparePlayer(
-            source: src,
-            loop: loop,
-            muted: muted,
-            autoplay: autoplay
-        )
-    }
-
-    /// In a pager: own player, loaded as soon as the page is pre-rendered.
-    /// Only the settled page's player is adopted (and plays).
-    private func syncPaged(src: String, active: Bool, autoplay: Bool, loop: Bool, muted: Bool) {
-        if ownPlayer == nil || src != configuredSource {
-            if let old = ownPlayer {
+        if player == nil || src != configuredSource {
+            if let old = player {
                 MediaPlayerManager.shared.release(player: old)
             }
             configuredSource = src
-            ownPlayer = makeOwnPlayer(src: src)
-            player = ownPlayer
+            player = makePlayer(src: src)
         }
 
-        guard let own = ownPlayer else { return }
-        own.isMuted = muted
+        player?.isMuted = muted
+        apply()
+    }
 
-        if active {
-            MediaPlayerManager.shared.adopt(player: own, source: src, loop: loop, autoplay: autoplay)
+    func setVisible(_ visible: Bool) {
+        guard visible != self.visible else { return }
+        self.visible = visible
+        apply()
+    }
+
+    /// Visible → adopt (the facade drives this surface) and honour autoplay.
+    /// Hidden → let go, pause, rewind so it starts clean when it returns.
+    private func apply() {
+        guard let player else { return }
+
+        if visible {
+            MediaPlayerManager.shared.adopt(player: player, source: configuredSource, loop: loop, autoplay: autoplay)
         } else {
-            MediaPlayerManager.shared.release(player: own)
-            own.pause()
-            own.seek(to: .zero)
+            MediaPlayerManager.shared.release(player: player)
+            player.pause()
+            player.seek(to: .zero)
         }
     }
 
-    private func makeOwnPlayer(src: String) -> AVPlayer? {
+    private func makePlayer(src: String) -> AVPlayer? {
         guard let url = MediaPlayerManager.resolveURL(src) else { return nil }
 
         let item = AVPlayerItem(url: url)
-        // Enough to start instantly on swipe without buffering the whole clip
-        // for a page that may never be reached.
+        // Enough to start instantly when the surface scrolls in, without
+        // buffering the whole clip for a page that may never be reached.
         item.preferredForwardBufferDuration = 3
 
         let player = AVPlayer(playerItem: item)
@@ -130,9 +132,9 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
     }
 
     func surfaceGone() {
-        guard let own = ownPlayer else { return }
-        MediaPlayerManager.shared.release(player: own)
-        own.pause()
+        guard let player else { return }
+        MediaPlayerManager.shared.release(player: player)
+        player.pause()
     }
 }
 
@@ -142,18 +144,24 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
 /// for the developer's own overlaid Element UI.
 private struct MediaPlayerBareSurface: UIViewRepresentable {
     let player: AVPlayer
+    let gravity: AVLayerVideoGravity
 
     func makeUIView(context: Context) -> MediaPlayerLayerView {
         let view = MediaPlayerLayerView()
         view.playerLayer.player = player
-        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.videoGravity = gravity
         view.backgroundColor = .black
+        // Cover / fill overflow the frame; keep the crop inside it.
+        view.clipsToBounds = true
         return view
     }
 
     func updateUIView(_ uiView: MediaPlayerLayerView, context: Context) {
         if uiView.playerLayer.player !== player {
             uiView.playerLayer.player = player
+        }
+        if uiView.playerLayer.videoGravity != gravity {
+            uiView.playerLayer.videoGravity = gravity
         }
     }
 }
