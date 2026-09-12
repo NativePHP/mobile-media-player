@@ -70,7 +70,10 @@
             }
         ],
         "dependencies": {
-            "implementation": []
+            "implementation": [
+                "androidx.media3:media3-exoplayer:1.5.1",
+                "androidx.media3:media3-ui:1.5.1"
+            ]
         }
     },
     "ios": {

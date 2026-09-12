@@ -7,8 +7,9 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.widget.VideoView
 import androidx.fragment.app.FragmentActivity
+import androidx.media3.common.C
+import androidx.media3.common.Player
 import com.nativephp.mobile.utils.NativeActionCoordinator
 import org.json.JSONObject
 import java.io.File
@@ -21,9 +22,11 @@ import java.lang.ref.WeakReference
  *
  * - Headless playback runs through a plain android.media.MediaPlayer
  *   (no ExoPlayer/Media3 dependency).
- * - Element playback (VideoView) is "adopted" via [adoptElementPlayback],
- *   so facade calls (pause / resume / seek / volume / status) drive the
- *   on-screen surface too.
+ * - Element playback (a Media3 Player owned by the `video_player`
+ *   renderer) is "adopted" via [adoptElementPlayback], so facade calls
+ *   (pause / resume / seek / volume / status) drive the on-screen surface
+ *   too. Inside a paged container several surfaces coexist; only the one
+ *   on the visible page is adopted at a time.
  *
  * Fires "NativePHP\MediaPlayer\Events\PlaybackEnded" / "...\PlaybackError"
  * through NativeActionCoordinator.dispatchEvent — the same event-dispatch
@@ -38,10 +41,9 @@ object MediaPlayerManager {
 
     private var headlessPlayer: MediaPlayer? = null
 
-    // Element (VideoView) playback adopted from the video_player renderer.
-    // Weak refs — the Compose surface owns the view lifecycle, not us.
-    private var elementView: WeakReference<VideoView>? = null
-    private var elementPlayer: WeakReference<MediaPlayer>? = null
+    // Element playback adopted from the video_player renderer. Weak ref —
+    // the Compose surface owns the player lifecycle, not us.
+    private var elementPlayer: WeakReference<Player>? = null
 
     private var activityRef: WeakReference<FragmentActivity>? = null
 
@@ -104,7 +106,7 @@ object MediaPlayerManager {
         }
 
         try {
-            elementView?.get()?.pause() ?: headlessPlayer?.pause()
+            elementPlayer?.get()?.pause() ?: headlessPlayer?.pause()
             state = "paused"
         } catch (e: Exception) {
             Log.e(TAG, "❌ pause failed: ${e.message}")
@@ -113,12 +115,12 @@ object MediaPlayerManager {
 
     fun resume() {
         try {
-            val view = elementView?.get()
-            if (view != null) {
+            val element = elementPlayer?.get()
+            if (element != null) {
                 if (state == "ended") {
-                    view.seekTo(0)
+                    element.seekTo(0)
                 }
-                view.start()
+                element.play()
             } else {
                 val player = headlessPlayer ?: return
                 if (state == "ended") {
@@ -141,7 +143,7 @@ object MediaPlayerManager {
         val ms = (seconds * 1000).toInt().coerceAtLeast(0)
 
         try {
-            elementView?.get()?.seekTo(ms) ?: headlessPlayer?.seekTo(ms)
+            elementPlayer?.get()?.seekTo(ms.toLong()) ?: headlessPlayer?.seekTo(ms)
             if (state == "ended") {
                 state = "paused"
             }
@@ -154,9 +156,12 @@ object MediaPlayerManager {
         val clamped = volume.coerceIn(0f, 1f)
 
         try {
-            // Element playback: the underlying MediaPlayer captured onPrepared.
-            elementPlayer?.get()?.setVolume(clamped, clamped)
-                ?: headlessPlayer?.setVolume(clamped, clamped)
+            val element = elementPlayer?.get()
+            if (element != null) {
+                element.volume = clamped
+            } else {
+                headlessPlayer?.setVolume(clamped, clamped)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "❌ setVolume failed: ${e.message}")
         }
@@ -167,10 +172,11 @@ object MediaPlayerManager {
         var duration = 0.0
 
         try {
-            val view = elementView?.get()
-            if (view != null) {
-                position = view.currentPosition / 1000.0
-                duration = view.duration.coerceAtLeast(0) / 1000.0
+            val element = elementPlayer?.get()
+            if (element != null) {
+                position = element.currentPosition.coerceAtLeast(0L) / 1000.0
+                val known = element.duration
+                duration = if (known == C.TIME_UNSET) 0.0 else known.coerceAtLeast(0L) / 1000.0
             } else {
                 headlessPlayer?.let {
                     position = it.currentPosition / 1000.0
@@ -192,21 +198,29 @@ object MediaPlayerManager {
     // MARK: - Element (video_player renderer) adoption
 
     /**
-     * Adopt an on-screen VideoView as the shared playback, replacing any
-     * headless playback. Called by VideoPlayerRenderer from the VideoView's
-     * onPrepared callback, so the PHP facade keeps controlling on-screen
-     * playback and events fire for element playback too.
+     * Adopt an on-screen player as the shared playback, replacing any
+     * headless playback (and any previously adopted surface, which is
+     * paused first). Called by VideoPlayerRenderer once the surface is the
+     * one that should be playing, so the PHP facade keeps controlling
+     * on-screen playback and events fire for element playback too.
      */
     fun adoptElementPlayback(
-        view: VideoView,
-        player: MediaPlayer,
+        player: Player,
         sourceToPlay: String,
         activity: FragmentActivity?,
         playing: Boolean
     ) {
         releaseHeadless()
 
-        elementView = WeakReference(view)
+        val previous = elementPlayer?.get()
+        if (previous != null && previous !== player) {
+            try {
+                previous.pause()
+            } catch (e: Exception) {
+                // Ignore — the surface may already be released
+            }
+        }
+
         elementPlayer = WeakReference(player)
         if (activity != null) {
             activityRef = WeakReference(activity)
@@ -215,6 +229,22 @@ object MediaPlayerManager {
         state = if (playing) "playing" else "paused"
 
         Log.d(TAG, "🎬 Adopted element playback for $sourceToPlay (playing=$playing)")
+    }
+
+    /** True when [player] is the surface the facade currently drives. */
+    fun isAdopted(player: Player): Boolean = elementPlayer?.get() === player
+
+    /**
+     * Drop the adoption of [player] if it holds it — the surface left the
+     * visible page or is being disposed. Other surfaces are untouched.
+     */
+    fun releaseElementPlayback(player: Player) {
+        if (!isAdopted(player)) {
+            return
+        }
+        elementPlayer = null
+        source = null
+        state = "idle"
     }
 
     /**
@@ -265,13 +295,12 @@ object MediaPlayerManager {
         releaseHeadless()
 
         // Element playback isn't owned by the manager — pause the surface
-        // and drop the adoption instead of tearing the view down.
+        // and drop the adoption instead of tearing the player down.
         try {
-            elementView?.get()?.pause()
+            elementPlayer?.get()?.pause()
         } catch (e: Exception) {
             // Ignore
         }
-        elementView = null
         elementPlayer = null
         source = null
     }

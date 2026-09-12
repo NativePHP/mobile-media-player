@@ -9,13 +9,19 @@ import SwiftUI
 /// Layout (width / height / aspect) is applied by core's `NodeView` modifier
 /// stack around this view, so the renderer only draws the video surface.
 ///
-/// The surface adopts the shared `MediaPlayerManager` player for its source,
-/// so the PHP `MediaPlayer` facade (pause / resume / seek / volume / status)
-/// drives on-screen playback and PlaybackEnded / PlaybackError events fire
+/// Outside a paged container the surface adopts the shared
+/// `MediaPlayerManager` player for its source, so the PHP `MediaPlayer`
+/// facade drives on-screen playback and PlaybackEnded / PlaybackError fire
 /// for element playback too.
+///
+/// Inside one (mobile-ui's `reel`) `\.reelPageActive` is non-nil and the
+/// surface owns its own `AVPlayer`: the visible page's player is adopted by
+/// the manager and plays, while pre-rendered neighbours stay loaded but
+/// paused at the start so a swipe lands on video that starts instantly.
 struct MediaPlayerVideoRenderer: View {
     let node: NativeUINode
 
+    @Environment(\.reelPageActive) private var pageActive: Bool?
     @StateObject private var model = MediaPlayerSurfaceModel()
 
     var body: some View {
@@ -39,24 +45,43 @@ struct MediaPlayerVideoRenderer: View {
                 Color.black
             }
         }
-        .onAppear {
-            model.configure(src: src, autoplay: autoplay, loop: loop, muted: muted)
+        .task(id: "\(src)|\(String(describing: pageActive))|\(autoplay)|\(loop)|\(muted)") {
+            model.sync(src: src, pageActive: pageActive, autoplay: autoplay, loop: loop, muted: muted)
         }
-        .onChange(of: src) { newSrc in
-            model.configure(src: newSrc, autoplay: autoplay, loop: loop, muted: muted)
+        .onDisappear {
+            model.surfaceGone()
         }
     }
 }
 
-/// Holds the AVPlayer for one `video_player` node across recompositions.
-/// Re-configures only when the source actually changes.
+/// Holds the AVPlayer for one `video_player` node across re-renders.
 private final class MediaPlayerSurfaceModel: ObservableObject {
     @Published var player: AVPlayer?
 
     private var configuredSource: String = ""
+    /// Player this surface owns while inside a paged container.
+    private var ownPlayer: AVPlayer?
 
-    func configure(src: String, autoplay: Bool, loop: Bool, muted: Bool) {
-        guard !src.isEmpty, src != configuredSource else { return }
+    func sync(src: String, pageActive: Bool?, autoplay: Bool, loop: Bool, muted: Bool) {
+        guard !src.isEmpty else { return }
+
+        guard let active = pageActive else {
+            syncShared(src: src, autoplay: autoplay, loop: loop, muted: muted)
+            return
+        }
+
+        syncPaged(src: src, active: active, autoplay: autoplay, loop: loop, muted: muted)
+    }
+
+    /// Not in a pager: the shared manager player, re-configured only when
+    /// the source changes.
+    private func syncShared(src: String, autoplay: Bool, loop: Bool, muted: Bool) {
+        if let own = ownPlayer {
+            MediaPlayerManager.shared.release(player: own)
+            ownPlayer = nil
+        }
+
+        guard src != configuredSource else { return }
 
         configuredSource = src
         player = MediaPlayerManager.shared.preparePlayer(
@@ -65,6 +90,49 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
             muted: muted,
             autoplay: autoplay
         )
+    }
+
+    /// In a pager: own player, loaded as soon as the page is pre-rendered.
+    /// Only the settled page's player is adopted (and plays).
+    private func syncPaged(src: String, active: Bool, autoplay: Bool, loop: Bool, muted: Bool) {
+        if ownPlayer == nil || src != configuredSource {
+            if let old = ownPlayer {
+                MediaPlayerManager.shared.release(player: old)
+            }
+            configuredSource = src
+            ownPlayer = makeOwnPlayer(src: src)
+            player = ownPlayer
+        }
+
+        guard let own = ownPlayer else { return }
+        own.isMuted = muted
+
+        if active {
+            MediaPlayerManager.shared.adopt(player: own, source: src, loop: loop, autoplay: autoplay)
+        } else {
+            MediaPlayerManager.shared.release(player: own)
+            own.pause()
+            own.seek(to: .zero)
+        }
+    }
+
+    private func makeOwnPlayer(src: String) -> AVPlayer? {
+        guard let url = MediaPlayerManager.resolveURL(src) else { return nil }
+
+        let item = AVPlayerItem(url: url)
+        // Enough to start instantly on swipe without buffering the whole clip
+        // for a page that may never be reached.
+        item.preferredForwardBufferDuration = 3
+
+        let player = AVPlayer(playerItem: item)
+        player.automaticallyWaitsToMinimizeStalling = true
+        return player
+    }
+
+    func surfaceGone() {
+        guard let own = ownPlayer else { return }
+        MediaPlayerManager.shared.release(player: own)
+        own.pause()
     }
 }
 

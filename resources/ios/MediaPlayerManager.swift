@@ -19,6 +19,10 @@ final class MediaPlayerManager: NSObject {
     private(set) var state: String = "idle"
 
     private var shouldLoop = false
+    /// False while `player` belongs to a `video_player` surface (adopted via
+    /// `adopt(player:)`): teardown then pauses and lets go instead of
+    /// stripping the surface's item.
+    private var ownsPlayer = true
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
@@ -71,6 +75,7 @@ final class MediaPlayerManager: NSObject {
         self.player = player
         self.source = source
         self.shouldLoop = loop
+        self.ownsPlayer = true
 
         observe(item: item)
 
@@ -82,6 +87,53 @@ final class MediaPlayerManager: NSObject {
         }
 
         return player
+    }
+
+    /// Adopt a surface-owned player (a `video_player` inside a paged
+    /// container) as the shared playback. Any previous playback is paused
+    /// and released; the facade then drives this player until another one
+    /// is adopted or `release(player:)` drops it.
+    func adopt(player: AVPlayer, source: String, loop: Bool, autoplay: Bool) {
+        if self.player === player {
+            shouldLoop = loop
+            if autoplay, state != "playing" {
+                player.play()
+                state = "playing"
+            }
+            return
+        }
+
+        teardown()
+        configureAudioSession()
+
+        self.player = player
+        self.source = source
+        self.shouldLoop = loop
+        self.ownsPlayer = false
+
+        if let item = player.currentItem {
+            observe(item: item)
+        }
+
+        if autoplay {
+            player.play()
+            state = "playing"
+        } else {
+            state = "paused"
+        }
+    }
+
+    /// True when `player` is the surface the facade currently drives.
+    func isAdopted(_ player: AVPlayer) -> Bool {
+        self.player === player
+    }
+
+    /// Drop `player` if it is the adopted one — its page left the screen
+    /// or its surface is going away. Other players are untouched.
+    func release(player: AVPlayer) {
+        guard isAdopted(player) else { return }
+        teardown()
+        state = "idle"
     }
 
     func pause() {
@@ -234,9 +286,12 @@ final class MediaPlayerManager: NSObject {
         statusObservation = nil
 
         player?.pause()
-        player?.replaceCurrentItem(with: nil)
+        if ownsPlayer {
+            player?.replaceCurrentItem(with: nil)
+        }
         player = nil
         source = nil
         shouldLoop = false
+        ownsPlayer = true
     }
 }
