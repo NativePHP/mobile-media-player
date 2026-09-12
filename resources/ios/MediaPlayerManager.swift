@@ -195,7 +195,14 @@ final class MediaPlayerManager: NSObject {
 
     /// Set the playback audio session category before playing (mirrors the
     /// microphone plugin's use of AVAudioSession.sharedInstance()).
+    private var audioSessionConfigured = false
+
     func configureAudioSession() {
+        // Once per process: re-activating the session on every adoption
+        // (each page of a feed) is a visible hitch for the player already
+        // rendering.
+        guard !audioSessionConfigured else { return }
+        audioSessionConfigured = true
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)

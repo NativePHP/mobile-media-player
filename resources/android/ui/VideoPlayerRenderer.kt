@@ -2,7 +2,11 @@ package com.nativephp.plugins.media_player.ui
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -12,6 +16,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -28,6 +34,9 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.nativephp.mobile.ui.nativerender.NativeUINode
 import com.nativephp.plugins.media_player.MediaPlayerManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.URL
 
 /**
  * Renderer for the `video_player` element type. Registered by the generated
@@ -40,9 +49,14 @@ import com.nativephp.plugins.media_player.MediaPlayerManager
  *
  * Each surface is prepared as soon as it is composed so a page that
  * scrolls in starts instantly. `autoplay` means "play while mostly on
- * screen": the surface watches its own window bounds and pauses (and
- * rewinds) when it drops below half visible, playing again when it comes
- * back — a feed pager needs no coordination, and nothing in core mediates.
+ * screen": the surface measures how much of it is inside the window,
+ * plays at half or more, pauses below that, and rewinds only once it is
+ * fully off screen — a feed pager needs no coordination, and nothing in
+ * core mediates.
+ *
+ * Nothing happens before the first measurement: a freshly composed
+ * neighbour that assumed it was visible would adopt the shared player
+ * slot and pause the page actually being watched.
  *
  * The playing surface is adopted by `MediaPlayerManager`, so the PHP
  * `MediaPlayer` facade drives it and PlaybackEnded / PlaybackError fire
@@ -58,8 +72,10 @@ object VideoPlayerRenderer {
         val autoplay = p.getBool("autoplay")
         val loop = p.getBool("loop")
         val muted = p.getBool("muted")
+        val poster = p.getString("poster")
         // 1 contain (default), 2 cover, 3 fill — the Image `fit` contract.
-        val resizeMode = when (p.getInt("fit", 1)) {
+        val fit = p.getInt("fit", 1)
+        val resizeMode = when (fit) {
             2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
             3 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
             else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -123,52 +139,112 @@ object VideoPlayerRenderer {
             player.volume = if (muted) 0f else 1f
         }
 
-        // Mostly on screen → adopt (the facade drives this surface) and
-        // honour autoplay. Off screen (a pre-composed pager neighbour, a
-        // row scrolled away) → let go, pause, rewind so it starts clean.
-        var visible by remember { mutableStateOf(true) }
-        LaunchedEffect(player, src, visible, autoplay) {
-            if (!visible) {
-                player.pause()
-                player.seekTo(0)
-                MediaPlayerManager.releaseElementPlayback(player)
-                return@LaunchedEffect
+        // Fraction of the surface inside the window; null until measured.
+        var visibleFraction by remember { mutableStateOf<Float?>(null) }
+        // Play once nearly settled (90%); pause below half; between the two
+        // keep whatever state it was in, so a drag that stalls halfway
+        // doesn't restart the video every time it wobbles.
+        val shown: Boolean? = visibleFraction?.let { f ->
+            when {
+                f >= 0.9f -> true
+                f < 0.5f -> false
+                else -> null
             }
+        }
+        val offscreen = visibleFraction == 0f
 
-            player.playWhenReady = autoplay
-            MediaPlayerManager.adoptElementPlayback(
-                player = player,
-                sourceToPlay = src,
-                activity = activity,
-                playing = autoplay
-            )
+        LaunchedEffect(player, src, shown, autoplay) {
+            when (shown) {
+                null -> return@LaunchedEffect
+                true -> {
+                    player.playWhenReady = autoplay
+                    MediaPlayerManager.adoptElementPlayback(
+                        player = player,
+                        sourceToPlay = src,
+                        activity = activity,
+                        playing = autoplay
+                    )
+                }
+                false -> {
+                    player.pause()
+                    MediaPlayerManager.releaseElementPlayback(player)
+                }
+            }
         }
 
-        AndroidView(
+        // Rewind only once fully off screen, so it starts clean when it
+        // comes back and the rewind is never seen mid-swipe.
+        LaunchedEffect(player, offscreen) {
+            if (offscreen) player.seekTo(0)
+        }
+
+        // Poster on top until the first frame renders — a page then shows
+        // its still the instant it exists instead of black.
+        var firstFrame by remember(player, src) { mutableStateOf(false) }
+        DisposableEffect(player, src) {
+            val listener = object : Player.Listener {
+                override fun onRenderedFirstFrame() { firstFrame = true }
+            }
+            player.addListener(listener)
+            onDispose { player.removeListener(listener) }
+        }
+        val posterBitmap = remember(poster) { mutableStateOf<android.graphics.Bitmap?>(null) }
+        LaunchedEffect(poster) {
+            posterBitmap.value = if (poster.isEmpty()) null else withContext(Dispatchers.IO) {
+                runCatching {
+                    val uri = MediaPlayerManager.resolveUri(poster)
+                    if (uri.scheme == "file" || uri.scheme == null) {
+                        BitmapFactory.decodeFile(uri.path)
+                    } else {
+                        URL(poster).openStream().use { BitmapFactory.decodeStream(it) }
+                    }
+                }.getOrNull()
+            }
+        }
+
+        Box(
             modifier = modifier.onGloballyPositioned { coords ->
                 val size = coords.size
                 if (size.width <= 0 || size.height <= 0) return@onGloballyPositioned
-                val shown = coords.boundsInWindow()
-                val fraction = (shown.width * shown.height) / (size.width.toFloat() * size.height.toFloat())
-                visible = fraction >= 0.5f
-            },
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    useController = controls
-                    setShutterBackgroundColor(Color.BLACK)
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    this.resizeMode = resizeMode
-                    this.player = player
-                }
-            },
-            update = { view ->
-                view.useController = controls
-                view.resizeMode = resizeMode
-                if (view.player !== player) {
-                    view.player = player
-                }
+                val bounds = coords.boundsInWindow()
+                val fraction = (bounds.width * bounds.height) / (size.width.toFloat() * size.height.toFloat())
+                visibleFraction = fraction.coerceIn(0f, 1f)
             }
-        )
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = controls
+                        setShutterBackgroundColor(Color.BLACK)
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                        this.resizeMode = resizeMode
+                        this.player = player
+                    }
+                },
+                update = { view ->
+                    view.useController = controls
+                    view.resizeMode = resizeMode
+                    if (view.player !== player) {
+                        view.player = player
+                    }
+                }
+            )
+
+            val bitmap = posterBitmap.value
+            if (bitmap != null && !firstFrame) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = when (fit) {
+                        2 -> ContentScale.Crop
+                        3 -> ContentScale.FillBounds
+                        else -> ContentScale.Fit
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
     }
 
     /**

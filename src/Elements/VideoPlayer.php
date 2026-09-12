@@ -54,6 +54,9 @@ class VideoPlayer extends Element
         if (isset($attrs['fit'])) {
             $this->fit((int) $attrs['fit']);
         }
+        if (isset($attrs['poster'])) {
+            $this->poster($attrs['poster']);
+        }
     }
 
     public function src(string $src): static
@@ -99,6 +102,18 @@ class VideoPlayer extends Element
     public function fit(int $mode): static
     {
         $this->videoProps['fit'] = $mode;
+
+        return $this;
+    }
+
+    /**
+     * Image shown in place of the video until the player has a frame to
+     * draw — a feed page then never pops from black. URL or file path,
+     * fitted like the video.
+     */
+    public function poster(string $src): static
+    {
+        $this->videoProps['poster'] = $src;
 
         return $this;
     }
