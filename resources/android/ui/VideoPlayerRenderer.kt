@@ -141,16 +141,9 @@ object VideoPlayerRenderer {
 
         // Fraction of the surface inside the window; null until measured.
         var visibleFraction by remember { mutableStateOf<Float?>(null) }
-        // Play once nearly settled (90%); pause below half; between the two
-        // keep whatever state it was in, so a drag that stalls halfway
-        // doesn't restart the video every time it wobbles.
-        val shown: Boolean? = visibleFraction?.let { f ->
-            when {
-                f >= 0.9f -> true
-                f < 0.5f -> false
-                else -> null
-            }
-        }
+        // Hand-off at the crossover, like Instagram's feed: play from ~45%
+        // on screen, pause below it — one threshold for both directions.
+        val shown: Boolean? = visibleFraction?.let { f -> f >= 0.45f }
         val offscreen = visibleFraction == 0f
 
         LaunchedEffect(player, src, shown, autoplay) {

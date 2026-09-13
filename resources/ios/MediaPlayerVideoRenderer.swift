@@ -163,12 +163,13 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
         }
     }
 
-    /// Play once the surface is nearly settled. Starting a second video
-    /// pipeline can blank the other page's layer for a frame; at 90% the
-    /// outgoing page is a sliver about to leave, so that lands where it
-    /// isn't seen. Pausing (at less than half) never blanks anything.
-    static let playAt = 0.9
-    static let pauseBelow = 0.5
+    /// The hand-off happens at the crossover, like Instagram's feed: the
+    /// incoming page starts as soon as it is ~45% on screen, and that is the
+    /// moment the outgoing page (now ~55% and shrinking) pauses. One
+    /// threshold for both directions, so a drag that wobbles never has two
+    /// pages playing or none.
+    static let playAt = 0.45
+    static let pauseBelow = 0.45
     static let attachAt = 0.01
 
     /// The attached layer's readiness edge. On the rising edge, start a
@@ -198,6 +199,10 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
         if fraction >= Self.playAt {
             if !playing {
                 playing = true
+                // The page being watched may buffer as far as it likes; a
+                // neighbour only holds a short lead so several of them
+                // don't starve it on a slow connection.
+                player.currentItem?.preferredForwardBufferDuration = 0
                 let holdPlay = autoplay && gated && !layerLive
                 MediaPlayerManager.shared.adopt(player: player, source: configuredSource, loop: loop, autoplay: autoplay && !holdPlay)
                 if holdPlay {
@@ -232,9 +237,10 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
         guard let url = MediaPlayerManager.resolveURL(src) else { return nil }
 
         let item = AVPlayerItem(url: url)
-        // Enough to start instantly when the surface scrolls in, without
-        // buffering the whole clip for a page that may never be reached.
-        item.preferredForwardBufferDuration = 3
+        // A short lead: enough to start instantly when the surface scrolls
+        // in, small enough that four buffering neighbours don't starve the
+        // page being watched. Lifted to "as much as you like" on adoption.
+        item.preferredForwardBufferDuration = 1.5
 
         let player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
