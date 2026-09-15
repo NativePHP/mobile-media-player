@@ -162,8 +162,9 @@ object VideoPlayerRenderer {
                 true -> {
                     if (MediaPlayerManager.isAdopted(player)) return@LaunchedEffect
                     // Crossing the threshold takes the slot from whoever has
-                    // it; otherwise only reclaim a free one.
-                    if (crossed || MediaPlayerManager.isIdle()) {
+                    // it; otherwise only reclaim one a neighbour let go of —
+                    // never one PHP emptied with stop().
+                    if (crossed || MediaPlayerManager.isReclaimable()) {
                         player.playWhenReady = autoplay
                         MediaPlayerManager.adoptElementPlayback(
                             player = player,

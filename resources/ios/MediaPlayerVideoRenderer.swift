@@ -132,6 +132,26 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
     /// adopt() ran with play held back; start on the next ready edge.
     private var playWhenReady = false
     private var readyFallback: DispatchWorkItem?
+    private var slotObserver: NSObjectProtocol?
+
+    init() {
+        // Visibility samples are suppressed while the fraction is unchanged,
+        // so a surface that settled before its neighbour let go would never
+        // get another look. The manager announces every change of hands;
+        // reassess then, off the posting stack so an adopt() inside one
+        // surface's apply() never re-enters another's.
+        slotObserver = NotificationCenter.default.addObserver(
+            forName: MediaPlayerManager.slotDidChange, object: nil, queue: nil
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.reassess() }
+        }
+    }
+
+    deinit {
+        if let slotObserver {
+            NotificationCenter.default.removeObserver(slotObserver)
+        }
+    }
 
     func sync(src: String, autoplay: Bool, loop: Bool, muted: Bool, gated: Bool) {
         guard !src.isEmpty else { return }
@@ -162,23 +182,31 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
         if attached != onScreen {
             attached = onScreen
         }
-        // A neighbour crossing the threshold adopts the shared slot and the
-        // manager pauses this player — not this model. Notice, so this
-        // surface knows it is no longer playing and can come back.
-        if playing, let player, !MediaPlayerManager.shared.isAdopted(player) {
-            playing = false
-            playWhenReady = false
-            readyFallback?.cancel()
-        }
-        // Act on a change of state, not on every layout tick — except to
-        // reclaim: this surface is still (or again) the one mostly on
-        // screen and the slot is free, because the neighbour that took it
-        // dropped back below the crossover without this one ever leaving.
+        // Act on a change of state, not on every layout tick.
         let wasShown = (was ?? 0) >= Self.playAt
         let wasHidden = (was ?? 0) < Self.pauseBelow
         let wasGone = was == nil || was == 0
         let transition = wasShown != (fraction >= Self.playAt) || wasHidden != (fraction < Self.pauseBelow) || wasGone != (fraction == 0)
-        let reclaim = !playing && fraction >= Self.playAt && MediaPlayerManager.shared.isIdle
+        reassess(transition: transition)
+    }
+
+    /// Runs on every visibility sample and whenever the shared slot changes
+    /// hands. A neighbour crossing the threshold adopts the slot and the
+    /// manager pauses this player — not this model — so first notice that.
+    /// Then reclaim if this surface is still (or again) the one mostly on
+    /// screen and the slot is free because that neighbour dropped back
+    /// below the crossover without this one ever leaving. An explicit
+    /// `stop()` from PHP leaves the slot empty but not reclaimable.
+    private func reassess(transition: Bool = false) {
+        guard let player, let fraction = visibleFraction else { return }
+
+        if playing, !MediaPlayerManager.shared.isAdopted(player) {
+            playing = false
+            playWhenReady = false
+            readyFallback?.cancel()
+        }
+
+        let reclaim = !playing && fraction >= Self.playAt && MediaPlayerManager.shared.isReclaimable
         if transition || reclaim {
             apply()
         }

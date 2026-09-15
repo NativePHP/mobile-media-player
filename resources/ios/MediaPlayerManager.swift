@@ -14,6 +14,12 @@ import Foundation
 final class MediaPlayerManager: NSObject {
     static let shared = MediaPlayerManager()
 
+    /// Posted on the main thread whenever the shared slot changes hands —
+    /// adopted, released, stopped, replaced. Surfaces reassess on it, so
+    /// one that lost the slot to a neighbour can take it back the moment
+    /// the neighbour lets go, even if its own geometry never changes again.
+    static let slotDidChange = Notification.Name("NativePHP.MediaPlayer.slotDidChange")
+
     private(set) var player: AVPlayer?
     private(set) var source: String?
     private(set) var state: String = "idle"
@@ -23,6 +29,10 @@ final class MediaPlayerManager: NSObject {
     /// `adopt(player:)`): teardown then pauses and lets go instead of
     /// stripping the surface's item.
     private var ownsPlayer = true
+    /// The slot is empty because PHP asked (`stop()`), not because a
+    /// surface let go. Surfaces must not quietly resume after that; a
+    /// threshold crossing (or `play()`) starts things again.
+    private var stoppedByFacade = false
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
@@ -76,6 +86,7 @@ final class MediaPlayerManager: NSObject {
         self.source = source
         self.shouldLoop = loop
         self.ownsPlayer = true
+        self.stoppedByFacade = false
 
         observe(item: item)
 
@@ -85,6 +96,8 @@ final class MediaPlayerManager: NSObject {
         } else {
             state = "paused"
         }
+
+        notifySlotChanged()
 
         return player
     }
@@ -110,6 +123,7 @@ final class MediaPlayerManager: NSObject {
         self.source = source
         self.shouldLoop = loop
         self.ownsPlayer = false
+        self.stoppedByFacade = false
 
         if let item = player.currentItem {
             observe(item: item)
@@ -121,6 +135,8 @@ final class MediaPlayerManager: NSObject {
         } else {
             state = "paused"
         }
+
+        notifySlotChanged()
     }
 
     /// True when `player` is the surface the facade currently drives.
@@ -128,10 +144,12 @@ final class MediaPlayerManager: NSObject {
         self.player === player
     }
 
-    /// True when nothing holds the shared slot — no adopted surface and no
-    /// headless playback — so a surface still mostly on screen may take it.
-    var isIdle: Bool {
-        player == nil
+    /// True when a surface still mostly on screen may take the shared
+    /// slot without crossing a threshold: nothing holds it (no adopted
+    /// surface, no headless playback) and it was not emptied by an
+    /// explicit `stop()`.
+    var isReclaimable: Bool {
+        player == nil && !stoppedByFacade
     }
 
     /// Drop `player` if it is the adopted one — its page left the screen
@@ -140,6 +158,7 @@ final class MediaPlayerManager: NSObject {
         guard isAdopted(player) else { return }
         teardown()
         state = "idle"
+        notifySlotChanged()
     }
 
     func pause() {
@@ -160,6 +179,8 @@ final class MediaPlayerManager: NSObject {
     func stop() {
         teardown()
         state = "idle"
+        stoppedByFacade = true
+        notifySlotChanged()
     }
 
     func seek(to seconds: Double) {
@@ -195,6 +216,10 @@ final class MediaPlayerManager: NSObject {
             "duration": duration,
             "source": source ?? "",
         ]
+    }
+
+    private func notifySlotChanged() {
+        NotificationCenter.default.post(name: Self.slotDidChange, object: self)
     }
 
     // MARK: - Helpers

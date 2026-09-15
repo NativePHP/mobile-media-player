@@ -65,6 +65,12 @@ object MediaPlayerManager {
     private val _adoptions = MutableStateFlow(0)
     val adoptions: StateFlow<Int> = _adoptions.asStateFlow()
 
+    // The slot is empty because PHP asked (`stop()`), not because a
+    // surface let go. Surfaces must not quietly resume after that; a
+    // threshold crossing (or `play()`) starts things again.
+    @Volatile
+    private var stoppedByFacade = false
+
     // MARK: - Playback control
 
     /**
@@ -100,6 +106,8 @@ object MediaPlayerManager {
             headlessPlayer = player
             source = sourceToPlay
             state = "playing"
+            stoppedByFacade = false
+            _adoptions.update { it + 1 }
 
             Log.d(TAG, "🎬 Playing $sourceToPlay (loop=$loop, volume=$clamped)")
             true
@@ -148,6 +156,7 @@ object MediaPlayerManager {
     fun stop() {
         release()
         state = "idle"
+        stoppedByFacade = true
     }
 
     fun seek(seconds: Double) {
@@ -238,6 +247,7 @@ object MediaPlayerManager {
         }
         source = sourceToPlay
         state = if (playing) "playing" else "paused"
+        stoppedByFacade = false
         _adoptions.update { it + 1 }
 
         Log.d(TAG, "🎬 Adopted element playback for $sourceToPlay (playing=$playing)")
@@ -247,10 +257,12 @@ object MediaPlayerManager {
     fun isAdopted(player: Player): Boolean = elementPlayer?.get() === player
 
     /**
-     * True when nothing holds the shared slot — no adopted surface and no
-     * headless playback — so a surface still mostly on screen may take it.
+     * True when a surface still mostly on screen may take the shared slot
+     * without crossing a threshold: nothing holds it (no adopted surface,
+     * no headless playback) and it was not emptied by an explicit [stop].
      */
-    fun isIdle(): Boolean = elementPlayer?.get() == null && headlessPlayer == null
+    fun isReclaimable(): Boolean =
+        elementPlayer?.get() == null && headlessPlayer == null && !stoppedByFacade
 
     /**
      * Drop the adoption of [player] if it holds it — the surface left the
