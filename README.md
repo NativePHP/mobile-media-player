@@ -84,7 +84,7 @@ Each surface owns its own player, prepared as soon as the surface exists. With
 pauses below that, rewinding only once it is fully off screen. Outside a scroll
 view it counts as visible and just plays. That is all a swipe feed needs: the
 page on screen plays, its neighbours sit buffered and silent, and the hand-off
-happens at the crossover. Pair it with mobile-ui's `<native:reel>` for the
+happens at the crossover. Pair it with mobile-ui's `<native:pager>` for the
 TikTok-style feed.
 
 The surface on screen is the one the `MediaPlayer` facade drives, so

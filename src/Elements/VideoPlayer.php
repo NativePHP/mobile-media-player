@@ -96,7 +96,7 @@ class VideoPlayer extends Element
 
     /**
      * How the frame is fitted into the surface: 1 contain (letterbox,
-     * default), 2 cover (fill and crop — the reel / feed look), 3 fill
+     * default), 2 cover (fill and crop — the feed look), 3 fill
      * (stretch). Mirrors Image::fit() and the `object-*` classes.
      */
     public function fit(int $mode): static
