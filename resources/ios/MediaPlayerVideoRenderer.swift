@@ -61,7 +61,15 @@ struct MediaPlayerVideoRenderer: View {
 
             if let player = model.player {
                 if controls {
+                    // AVKit's VideoPlayer measures nothing, so a transparent,
+                    // touch-transparent probe the same size reports visibility
+                    // for it — otherwise the surface is never adopted and
+                    // autoplay, looping, events and the facade all go dead.
                     VideoPlayer(player: player)
+                        .overlay(
+                            MediaPlayerVisibilityProbe(onVisibleFraction: { fraction in model.setVisibleFraction(fraction) })
+                                .allowsHitTesting(false)
+                        )
                 } else {
                     // Bare surface — no transport chrome. Developers overlay
                     // their own Element UI and drive playback via the facade.
@@ -154,11 +162,24 @@ private final class MediaPlayerSurfaceModel: ObservableObject {
         if attached != onScreen {
             attached = onScreen
         }
-        // Only act on a change of state, not on every layout tick.
+        // A neighbour crossing the threshold adopts the shared slot and the
+        // manager pauses this player — not this model. Notice, so this
+        // surface knows it is no longer playing and can come back.
+        if playing, let player, !MediaPlayerManager.shared.isAdopted(player) {
+            playing = false
+            playWhenReady = false
+            readyFallback?.cancel()
+        }
+        // Act on a change of state, not on every layout tick — except to
+        // reclaim: this surface is still (or again) the one mostly on
+        // screen and the slot is free, because the neighbour that took it
+        // dropped back below the crossover without this one ever leaving.
         let wasShown = (was ?? 0) >= Self.playAt
         let wasHidden = (was ?? 0) < Self.pauseBelow
         let wasGone = was == nil || was == 0
-        if wasShown != (fraction >= Self.playAt) || wasHidden != (fraction < Self.pauseBelow) || wasGone != (fraction == 0) {
+        let transition = wasShown != (fraction >= Self.playAt) || wasHidden != (fraction < Self.pauseBelow) || wasGone != (fraction == 0)
+        let reclaim = !playing && fraction >= Self.playAt && MediaPlayerManager.shared.isIdle
+        if transition || reclaim {
             apply()
         }
     }
@@ -293,38 +314,39 @@ private struct MediaPlayerBareSurface: UIViewRepresentable {
     }
 }
 
-/// UIView whose backing layer is an AVPlayerLayer, so the video always
-/// tracks the view's bounds without manual layout. Reports the layer's
-/// `isReadyForDisplay` so a poster can be dropped exactly when the first
-/// frame is drawable.
-final class MediaPlayerLayerView: UIView {
-    override class var layerClass: AnyClass { AVPlayerLayer.self }
+/// Transparent view that only measures. Overlaid on AVKit's `VideoPlayer`
+/// (the `controls=true` surface) so both variants feed the same
+/// visibility state machine.
+private struct MediaPlayerVisibilityProbe: UIViewRepresentable {
+    var onVisibleFraction: ((Double) -> Void)? = nil
 
-    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    func makeUIView(context: Context) -> MediaPlayerVisibilityView {
+        let view = MediaPlayerVisibilityView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.onVisibleFraction = onVisibleFraction
+        return view
+    }
 
-    var onReadyForDisplay: ((Bool) -> Void)?
-    /// Fraction of this view inside its window, reported on change. Measured
-    /// here, in window coordinates, on a light timer: SwiftUI's geometry
-    /// only re-evaluates on layout passes and its scroll-visibility
-    /// callbacks proved unreliable across re-renders, while a UIView's
-    /// position in the window is always exact, scrolling included.
+    func updateUIView(_ uiView: MediaPlayerVisibilityView, context: Context) {
+        uiView.onVisibleFraction = onVisibleFraction
+    }
+}
+
+/// UIView that reports how much of itself is actually visible: inside the
+/// window AND inside every clipping ancestor (a pager or scroll view
+/// smaller than the screen clips its neighbours, and a clipped-away
+/// neighbour must not count as on screen, adopt playback and pause the
+/// page really being watched). Measured on a light timer in window
+/// coordinates: SwiftUI's geometry only re-evaluates on layout passes and
+/// its scroll-visibility callbacks proved unreliable across re-renders,
+/// while a UIView's position in the window is always exact, scrolling
+/// included.
+class MediaPlayerVisibilityView: UIView {
     var onVisibleFraction: ((Double) -> Void)?
 
-    private var readyObservation: NSKeyValueObservation?
     private var visibilityTimer: Timer?
     private var lastFraction: Double = -1
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
-            let ready = layer.isReadyForDisplay
-            DispatchQueue.main.async { self?.onReadyForDisplay?(ready) }
-        }
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -349,11 +371,25 @@ final class MediaPlayerLayerView: UIView {
             return
         }
         let inWindow = convert(bounds, to: window)
-        let shown = inWindow.intersection(window.bounds)
-        // Against the smaller of the view and the window: a cover-fitted
+
+        // The region anything can be seen in: the window, narrowed by every
+        // ancestor that clips its subviews (UIScrollView always does).
+        var container = window.bounds
+        var ancestor = superview
+        while let view = ancestor, !container.isNull {
+            if view.clipsToBounds || view.layer.masksToBounds {
+                container = container.intersection(view.convert(view.bounds, to: window))
+            }
+            ancestor = view.superview
+        }
+
+        let shown = container.isNull ? CGRect.null : inWindow.intersection(container)
+        // Against the smaller of the view and the container: a cover-fitted
         // surface is wider than the screen, and "fully on screen" must
         // still read as 1.
-        let reference = min(inWindow.width * inWindow.height, window.bounds.width * window.bounds.height)
+        let reference = container.isNull
+            ? 0
+            : min(inWindow.width * inWindow.height, container.width * container.height)
         let fraction = shown.isNull || reference <= 0 ? 0 : Double((shown.width * shown.height) / reference)
         report(min(1, max(0, fraction)))
     }
@@ -369,5 +405,31 @@ final class MediaPlayerLayerView: UIView {
 
     deinit {
         visibilityTimer?.invalidate()
+    }
+}
+
+/// UIView whose backing layer is an AVPlayerLayer, so the video always
+/// tracks the view's bounds without manual layout. Reports the layer's
+/// `isReadyForDisplay` so a poster can be dropped exactly when the first
+/// frame is drawable, and inherits the visibility measurement.
+final class MediaPlayerLayerView: MediaPlayerVisibilityView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+    var onReadyForDisplay: ((Bool) -> Void)?
+
+    private var readyObservation: NSKeyValueObservation?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+            let ready = layer.isReadyForDisplay
+            DispatchQueue.main.async { self?.onReadyForDisplay?(ready) }
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }

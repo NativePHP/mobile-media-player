@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -146,19 +147,33 @@ object VideoPlayerRenderer {
         val shown: Boolean? = visibleFraction?.let { f -> f >= 0.45f }
         val offscreen = visibleFraction == 0f
 
-        LaunchedEffect(player, src, shown, autoplay) {
+        // Re-run when the shared slot changes hands as well as on our own
+        // threshold crossings: a neighbour that crossed the threshold takes
+        // the slot (the manager pauses this player), and if it then backs
+        // off below the threshold without this page ever leaving, this
+        // surface must take the slot back — its own `shown` never changed.
+        val adoptions by MediaPlayerManager.adoptions.collectAsState()
+        var lastShown by remember(player, src) { mutableStateOf<Boolean?>(null) }
+        LaunchedEffect(player, src, shown, autoplay, adoptions) {
+            val crossed = shown != lastShown
+            lastShown = shown
             when (shown) {
                 null -> return@LaunchedEffect
                 true -> {
-                    player.playWhenReady = autoplay
-                    MediaPlayerManager.adoptElementPlayback(
-                        player = player,
-                        sourceToPlay = src,
-                        activity = activity,
-                        playing = autoplay
-                    )
+                    if (MediaPlayerManager.isAdopted(player)) return@LaunchedEffect
+                    // Crossing the threshold takes the slot from whoever has
+                    // it; otherwise only reclaim a free one.
+                    if (crossed || MediaPlayerManager.isIdle()) {
+                        player.playWhenReady = autoplay
+                        MediaPlayerManager.adoptElementPlayback(
+                            player = player,
+                            sourceToPlay = src,
+                            activity = activity,
+                            playing = autoplay
+                        )
+                    }
                 }
-                false -> {
+                false -> if (crossed) {
                     player.pause()
                     MediaPlayerManager.releaseElementPlayback(player)
                 }

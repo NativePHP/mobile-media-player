@@ -128,6 +128,12 @@ final class MediaPlayerManager: NSObject {
         self.player === player
     }
 
+    /// True when nothing holds the shared slot — no adopted surface and no
+    /// headless playback — so a surface still mostly on screen may take it.
+    var isIdle: Bool {
+        player == nil
+    }
+
     /// Drop `player` if it is the adopted one — its page left the screen
     /// or its surface is going away. Other players are untouched.
     func release(player: AVPlayer) {

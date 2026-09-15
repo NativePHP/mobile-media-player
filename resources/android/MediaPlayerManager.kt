@@ -11,6 +11,10 @@ import androidx.fragment.app.FragmentActivity
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import com.nativephp.mobile.utils.NativeActionCoordinator
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.File
 import java.lang.ref.WeakReference
@@ -53,6 +57,13 @@ object MediaPlayerManager {
 
     @Volatile
     private var state: String = "idle"
+
+    // Bumped whenever the shared slot changes hands (adopted, released,
+    // stopped). Surfaces observe it so one that lost the slot to a
+    // neighbour can take it back the moment the neighbour lets go,
+    // without waiting for its own geometry to change.
+    private val _adoptions = MutableStateFlow(0)
+    val adoptions: StateFlow<Int> = _adoptions.asStateFlow()
 
     // MARK: - Playback control
 
@@ -227,12 +238,19 @@ object MediaPlayerManager {
         }
         source = sourceToPlay
         state = if (playing) "playing" else "paused"
+        _adoptions.update { it + 1 }
 
         Log.d(TAG, "🎬 Adopted element playback for $sourceToPlay (playing=$playing)")
     }
 
     /** True when [player] is the surface the facade currently drives. */
     fun isAdopted(player: Player): Boolean = elementPlayer?.get() === player
+
+    /**
+     * True when nothing holds the shared slot — no adopted surface and no
+     * headless playback — so a surface still mostly on screen may take it.
+     */
+    fun isIdle(): Boolean = elementPlayer?.get() == null && headlessPlayer == null
 
     /**
      * Drop the adoption of [player] if it holds it — the surface left the
@@ -245,6 +263,7 @@ object MediaPlayerManager {
         elementPlayer = null
         source = null
         state = "idle"
+        _adoptions.update { it + 1 }
     }
 
     /**
@@ -303,6 +322,7 @@ object MediaPlayerManager {
         }
         elementPlayer = null
         source = null
+        _adoptions.update { it + 1 }
     }
 
     // MARK: - Event dispatch
