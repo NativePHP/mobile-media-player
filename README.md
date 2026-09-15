@@ -71,18 +71,34 @@ Attributes:
 |------------|---------|-------------|
 | `src`      | —       | File path or URL |
 | `controls` | `true`  | Show native transport chrome |
-| `autoplay` | `false` | Start playback on mount |
+| `autoplay` | `false` | Play while the surface is on screen (see below) |
 | `loop`     | `false` | Restart when playback ends |
 | `muted`    | `false` | Start muted |
+| `fit`      | `1`     | How the frame fits the surface: `1` contain, `2` cover, `3` fill. The `object-contain`, `object-cover` and `object-fill` classes set it too |
+| `poster`   | —       | Image (URL or path) shown until the player has a frame to draw, fitted like the video |
 
 Sizing follows the element's layout props (`width`/`height`/`aspect` classes), like `Image`.
+
+Each surface owns its own player, prepared as soon as the surface exists. With
+`autoplay` it plays while at least 45% of it is inside its scroll view and
+pauses below that, rewinding only once it is fully off screen. Outside a scroll
+view it counts as visible and just plays. That is all a swipe feed needs: the
+page on screen plays, its neighbours sit buffered and silent, and the hand-off
+happens at the crossover. Pair it with mobile-ui's `<native:pager>` for the
+TikTok-style feed.
+
+The surface on screen is the one the `MediaPlayer` facade drives, so
+`MediaPlayer::pause()` from a tap handler pauses the video the user is looking
+at without naming it. With a `poster` and `controls=false`, the first play waits
+until the layer holds a frame, so the still never cuts to a clip already in
+motion.
 
 With `controls=false` you get a bare video surface — overlay your own Element UI
 and drive playback through the `MediaPlayer` facade:
 
 ```blade
-<stack class="w-full aspect-video">
-    <video-player :src="$src" :controls="false" autoplay muted class="w-full h-full"/>
+<stack class="w-full h-full">
+    <video-player :src="$src" poster="{{ $poster }}" :controls="false" autoplay loop class="w-full h-full object-cover"/>
     <button @press="togglePlayback" icon="pause.fill" class="absolute bottom-2 right-2"/>
 </stack>
 ```
@@ -96,7 +112,9 @@ VideoPlayer::make($path)
     ->controls(false)
     ->autoplay()
     ->loop()
-    ->muted();
+    ->muted()
+    ->fit(2)
+    ->poster($posterUrl);
 ```
 
 ## Events
@@ -186,11 +204,13 @@ The helpers are available on `Native::fakeBridge()` and chain directly off `Nati
 ## Platform Support
 
 - **iOS:** 16.0+ (AVPlayer / AVKit)
-- **Android:** API 26+ (MediaPlayer / Media3 UI)
+- **Android:** API 26+ (Media3 ExoPlayer for `video_player`; `android.media.MediaPlayer` for headless playback)
 
 ## Notes
 
-- One shared player: calling `play()` replaces whatever is currently playing.
+- One thing plays at a time: `play()` replaces whatever is playing, and a
+  `video_player` that comes on screen takes over from the previous one. Each
+  surface keeps its own player, so a feed of pages never fights over one.
 - Remote URLs require network access; local paths must be readable by the app
   (e.g. `storage_path()` or bundled assets).
 - No runtime permissions are required.

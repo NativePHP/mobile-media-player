@@ -14,11 +14,25 @@ import Foundation
 final class MediaPlayerManager: NSObject {
     static let shared = MediaPlayerManager()
 
+    /// Posted on the main thread whenever the shared slot changes hands —
+    /// adopted, released, stopped, replaced. Surfaces reassess on it, so
+    /// one that lost the slot to a neighbour can take it back the moment
+    /// the neighbour lets go, even if its own geometry never changes again.
+    static let slotDidChange = Notification.Name("NativePHP.MediaPlayer.slotDidChange")
+
     private(set) var player: AVPlayer?
     private(set) var source: String?
     private(set) var state: String = "idle"
 
     private var shouldLoop = false
+    /// False while `player` belongs to a `video_player` surface (adopted via
+    /// `adopt(player:)`): teardown then pauses and lets go instead of
+    /// stripping the surface's item.
+    private var ownsPlayer = true
+    /// The slot is empty because PHP asked (`stop()`), not because a
+    /// surface let go. Surfaces must not quietly resume after that; a
+    /// threshold crossing (or `play()`) starts things again.
+    private var stoppedByFacade = false
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
@@ -71,6 +85,8 @@ final class MediaPlayerManager: NSObject {
         self.player = player
         self.source = source
         self.shouldLoop = loop
+        self.ownsPlayer = true
+        self.stoppedByFacade = false
 
         observe(item: item)
 
@@ -81,7 +97,68 @@ final class MediaPlayerManager: NSObject {
             state = "paused"
         }
 
+        notifySlotChanged()
+
         return player
+    }
+
+    /// Adopt a surface-owned player (a `video_player` inside a paged
+    /// container) as the shared playback. Any previous playback is paused
+    /// and released; the facade then drives this player until another one
+    /// is adopted or `release(player:)` drops it.
+    func adopt(player: AVPlayer, source: String, loop: Bool, autoplay: Bool) {
+        if self.player === player {
+            shouldLoop = loop
+            if autoplay, state != "playing" {
+                player.play()
+                state = "playing"
+            }
+            return
+        }
+
+        teardown()
+        configureAudioSession()
+
+        self.player = player
+        self.source = source
+        self.shouldLoop = loop
+        self.ownsPlayer = false
+        self.stoppedByFacade = false
+
+        if let item = player.currentItem {
+            observe(item: item)
+        }
+
+        if autoplay {
+            player.play()
+            state = "playing"
+        } else {
+            state = "paused"
+        }
+
+        notifySlotChanged()
+    }
+
+    /// True when `player` is the surface the facade currently drives.
+    func isAdopted(_ player: AVPlayer) -> Bool {
+        self.player === player
+    }
+
+    /// True when a surface still mostly on screen may take the shared
+    /// slot without crossing a threshold: nothing holds it (no adopted
+    /// surface, no headless playback) and it was not emptied by an
+    /// explicit `stop()`.
+    var isReclaimable: Bool {
+        player == nil && !stoppedByFacade
+    }
+
+    /// Drop `player` if it is the adopted one — its page left the screen
+    /// or its surface is going away. Other players are untouched.
+    func release(player: AVPlayer) {
+        guard isAdopted(player) else { return }
+        teardown()
+        state = "idle"
+        notifySlotChanged()
     }
 
     func pause() {
@@ -102,6 +179,8 @@ final class MediaPlayerManager: NSObject {
     func stop() {
         teardown()
         state = "idle"
+        stoppedByFacade = true
+        notifySlotChanged()
     }
 
     func seek(to seconds: Double) {
@@ -139,11 +218,22 @@ final class MediaPlayerManager: NSObject {
         ]
     }
 
+    private func notifySlotChanged() {
+        NotificationCenter.default.post(name: Self.slotDidChange, object: self)
+    }
+
     // MARK: - Helpers
 
     /// Set the playback audio session category before playing (mirrors the
     /// microphone plugin's use of AVAudioSession.sharedInstance()).
+    private var audioSessionConfigured = false
+
     func configureAudioSession() {
+        // Once per process: re-activating the session on every adoption
+        // (each page of a feed) is a visible hitch for the player already
+        // rendering.
+        guard !audioSessionConfigured else { return }
+        audioSessionConfigured = true
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
@@ -234,9 +324,12 @@ final class MediaPlayerManager: NSObject {
         statusObservation = nil
 
         player?.pause()
-        player?.replaceCurrentItem(with: nil)
+        if ownsPlayer {
+            player?.replaceCurrentItem(with: nil)
+        }
         player = nil
         source = nil
         shouldLoop = false
+        ownsPlayer = true
     }
 }
