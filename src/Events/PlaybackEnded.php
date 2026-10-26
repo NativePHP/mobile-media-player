@@ -4,8 +4,9 @@ namespace NativePHP\MediaPlayer\Events;
 
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
+use Native\Mobile\Events\Contracts\DispatchableFromNative;
 
-class PlaybackEnded
+class PlaybackEnded implements DispatchableFromNative
 {
     use Dispatchable, SerializesModels;
 
