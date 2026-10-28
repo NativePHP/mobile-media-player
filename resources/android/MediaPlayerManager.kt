@@ -71,13 +71,18 @@ object MediaPlayerManager {
     @Volatile
     private var stoppedByFacade = false
 
+    // How fast playback goes, 1.0 being normal speed. Kept across play() calls until changed.
+    @Volatile
+    private var rate: Float = 1f
+
     // MARK: - Playback control
 
     /**
-     * Start (or replace) headless playback of a file path or URL.
+     * Start (or replace) headless playback of a file path or URL, from
+     * [position] seconds in, at [rate] (1.0 = normal speed).
      * Returns false when the player could not be created / prepared.
      */
-    fun play(activity: FragmentActivity, sourceToPlay: String, loop: Boolean, volume: Float): Boolean {
+    fun play(activity: FragmentActivity, sourceToPlay: String, loop: Boolean, volume: Float, rate: Float = 1f, position: Double = 0.0): Boolean {
         release()
 
         activityRef = WeakReference(activity)
@@ -95,7 +100,14 @@ object MediaPlayerManager {
             setDataSource(player, activity, sourceToPlay)
             player.isLooping = loop
             player.setVolume(clamped, clamped)
-            player.setOnPreparedListener { it.start() }
+            this.rate = rate.coerceIn(0.25f, 4f)
+            player.setOnPreparedListener {
+                if (position > 0) {
+                    it.seekTo((position * 1000).toInt())
+                }
+                it.start()
+                applyRate(it)
+            }
             player.setOnCompletionListener { onPlaybackEnded(sourceToPlay) }
             player.setOnErrorListener { _, what, extra ->
                 onPlaybackError(sourceToPlay, "MediaPlayer error what=$what extra=$extra")
@@ -109,7 +121,7 @@ object MediaPlayerManager {
             stoppedByFacade = false
             _adoptions.update { it + 1 }
 
-            Log.d(TAG, "🎬 Playing $sourceToPlay (loop=$loop, volume=$clamped)")
+            Log.d(TAG, "🎬 Playing $sourceToPlay (loop=$loop, volume=$clamped, rate=${this.rate}, position=$position)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to start playback: ${e.message}", e)
@@ -146,6 +158,7 @@ object MediaPlayerManager {
                     player.seekTo(0)
                 }
                 player.start()
+                applyRate(player)
             }
             state = "playing"
         } catch (e: Exception) {
@@ -184,6 +197,39 @@ object MediaPlayerManager {
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ setVolume failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Change how fast playback goes (1.0 = normal speed). A paused player
+     * stays paused and picks the speed up when it resumes.
+     */
+    fun setRate(rate: Float) {
+        this.rate = rate.coerceIn(0.25f, 4f)
+
+        try {
+            val element = elementPlayer?.get()
+            if (element != null) {
+                element.setPlaybackSpeed(this.rate)
+            } else if (state == "playing") {
+                headlessPlayer?.let { applyRate(it) }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ setRate failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Setting a speed on a prepared MediaPlayer also starts it, so this is
+     * only called on one that is playing.
+     */
+    private fun applyRate(player: MediaPlayer) {
+        try {
+            if (player.playbackParams.speed != rate) {
+                player.playbackParams = player.playbackParams.setSpeed(rate)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Could not set the playback speed: ${e.message}")
         }
     }
 

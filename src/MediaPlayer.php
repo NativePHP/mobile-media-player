@@ -5,9 +5,10 @@ namespace NativePHP\MediaPlayer;
 class MediaPlayer
 {
     /**
-     * Start (or replace) playback of a file path or URL on the shared player.
+     * Start (or replace) playback of a file path or URL on the shared player,
+     * from `position` seconds in, at `rate` (1.0 is normal speed, 2.0 twice as fast).
      *
-     * @param  array{loop?: bool, volume?: float}  $options
+     * @param  array{loop?: bool, volume?: float, rate?: float, position?: float}  $options
      */
     public function play(string $source, array $options = []): bool
     {
@@ -16,6 +17,8 @@ class MediaPlayer
                 'source' => $source,
                 'loop' => (bool) ($options['loop'] ?? false),
                 'volume' => (float) ($options['volume'] ?? 1.0),
+                'rate' => (float) ($options['rate'] ?? 1.0),
+                'position' => max(0.0, (float) ($options['position'] ?? 0.0)),
             ]));
 
             if ($result) {
@@ -78,6 +81,19 @@ class MediaPlayer
         if (function_exists('nativephp_call')) {
             nativephp_call('MediaPlayer.SetVolume', json_encode([
                 'volume' => max(0.0, min(1.0, $volume)),
+            ]));
+        }
+    }
+
+    /**
+     * Set how fast playback goes: 1.0 is normal speed, 2.0 twice as fast. A paused
+     * player stays paused and picks it up when it resumes.
+     */
+    public function setRate(float $rate): void
+    {
+        if (function_exists('nativephp_call')) {
+            nativephp_call('MediaPlayer.SetRate', json_encode([
+                'rate' => max(0.25, min(4.0, $rate)),
             ]));
         }
     }

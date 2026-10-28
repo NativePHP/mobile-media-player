@@ -108,6 +108,29 @@ class MediaPlayerMacros
             return $this;
         });
 
+        /**
+         * Assert the speed was set — to anything, or to exactly $rate when
+         * given (MediaPlayer::setRate()).
+         */
+        FakeBridge::macro('assertRateSet', function (?float $rate = null) {
+            if ($rate === null) {
+                return $this->assertCalled('MediaPlayer.SetRate');
+            }
+
+            $rates = array_map(
+                fn (array $call) => (float) ($call['params']['rate'] ?? 1.0),
+                $this->callsTo('MediaPlayer.SetRate')
+            );
+
+            Assert::assertContains(
+                $rate,
+                $rates,
+                "Expected the speed set to [{$rate}]. Set to: ".($rates === [] ? '(nothing)' : implode(', ', $rates))
+            );
+
+            return $this;
+        });
+
         /** Assert nothing was played (no MediaPlayer::play() call). */
         FakeBridge::macro('assertNothingPlayed', function () {
             return $this->assertNotCalled('MediaPlayer.Play');

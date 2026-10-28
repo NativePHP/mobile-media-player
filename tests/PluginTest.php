@@ -28,7 +28,7 @@ describe('Plugin Manifest', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
 
         expect($manifest['bridge_functions'])->toBeArray();
-        expect($manifest['bridge_functions'])->toHaveCount(8);
+        expect($manifest['bridge_functions'])->toHaveCount(9);
 
         foreach ($manifest['bridge_functions'] as $function) {
             expect($function)->toHaveKeys(['name', 'android', 'ios']);
@@ -45,6 +45,7 @@ describe('Plugin Manifest', function () {
         expect($names)->toContain('MediaPlayer.Stop');
         expect($names)->toContain('MediaPlayer.Seek');
         expect($names)->toContain('MediaPlayer.SetVolume');
+        expect($names)->toContain('MediaPlayer.SetRate');
         expect($names)->toContain('MediaPlayer.GetStatus');
         expect($names)->toContain('MediaPlayer.Present');
     });

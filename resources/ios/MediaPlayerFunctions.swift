@@ -16,6 +16,8 @@ enum MediaPlayerFunctions {
     ///   - source: string - File path or URL to play
     ///   - loop: (optional) boolean - Restart playback when the item ends (default: false)
     ///   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
+    ///   - rate: (optional) float - How fast it plays, 1.0 being normal speed (default: 1.0)
+    ///   - position: (optional) float - Seconds in to start from (default: 0)
     /// Returns:
     ///   - success: boolean - True if playback started
     /// Events:
@@ -29,6 +31,8 @@ enum MediaPlayerFunctions {
 
             let loop = parameters["loop"] as? Bool ?? false
             let volume = (parameters["volume"] as? NSNumber)?.floatValue ?? 1.0
+            let rate = (parameters["rate"] as? NSNumber)?.floatValue ?? 1.0
+            let position = (parameters["position"] as? NSNumber)?.doubleValue ?? 0
 
             print("🎬 Starting media playback: \(source)")
 
@@ -36,7 +40,7 @@ enum MediaPlayerFunctions {
             let semaphore = DispatchSemaphore(value: 0)
 
             DispatchQueue.main.async {
-                success = MediaPlayerManager.shared.play(source: source, loop: loop, volume: volume)
+                success = MediaPlayerManager.shared.play(source: source, loop: loop, volume: volume, rate: rate, position: position)
                 semaphore.signal()
             }
 
@@ -119,6 +123,23 @@ enum MediaPlayerFunctions {
 
             DispatchQueue.main.async {
                 MediaPlayerManager.shared.setVolume(volume)
+            }
+
+            return [:]
+        }
+    }
+
+    // MARK: - MediaPlayer.SetRate
+
+    /// Set how fast playback goes
+    /// Parameters:
+    ///   - rate: float - 1.0 is normal speed, 2.0 twice as fast
+    class SetRate: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            let rate = (parameters["rate"] as? NSNumber)?.floatValue ?? 1.0
+
+            DispatchQueue.main.async {
+                MediaPlayerManager.shared.setRate(rate)
             }
 
             return [:]

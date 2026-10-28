@@ -20,6 +20,8 @@ object MediaPlayerFunctions {
      *   - source: string - File path or URL to play
      *   - loop: (optional) boolean - Restart playback when the item ends (default: false)
      *   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
+     *   - rate: (optional) float - How fast it plays, 1.0 being normal speed (default: 1.0)
+     *   - position: (optional) float - Seconds in to start from (default: 0)
      * Returns:
      *   - success: boolean - True if playback started
      * Events:
@@ -35,6 +37,8 @@ object MediaPlayerFunctions {
 
             val loop = parameters["loop"] as? Boolean ?: false
             val volume = (parameters["volume"] as? Number)?.toFloat() ?: 1.0f
+            val rate = (parameters["rate"] as? Number)?.toFloat() ?: 1.0f
+            val position = (parameters["position"] as? Number)?.toDouble() ?: 0.0
 
             var success = false
             val latch = CountDownLatch(1)
@@ -42,7 +46,7 @@ object MediaPlayerFunctions {
             // MediaPlayer setup must run on the main thread
             Handler(Looper.getMainLooper()).post {
                 try {
-                    success = MediaPlayerManager.play(activity, source, loop, volume)
+                    success = MediaPlayerManager.play(activity, source, loop, volume, rate, position)
                 } catch (e: Exception) {
                     // Silent failure
                 }
@@ -139,6 +143,27 @@ object MediaPlayerFunctions {
             Handler(Looper.getMainLooper()).post {
                 try {
                     MediaPlayerManager.setVolume(volume)
+                } catch (e: Exception) {
+                    // Silent failure
+                }
+            }
+
+            return emptyMap()
+        }
+    }
+
+    /**
+     * Set how fast playback goes
+     * Parameters:
+     *   - rate: float - 1.0 is normal speed, 2.0 twice as fast
+     */
+    class SetRate(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val rate = (parameters["rate"] as? Number)?.toFloat() ?: 1.0f
+
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    MediaPlayerManager.setRate(rate)
                 } catch (e: Exception) {
                     // Silent failure
                 }

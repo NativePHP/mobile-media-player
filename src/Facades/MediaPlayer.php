@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void stop()
  * @method static void seek(float $seconds)
  * @method static void setVolume(float $volume)
+ * @method static void setRate(float $rate)
  * @method static array getStatus()
  * @method static bool present(string $source)
  *

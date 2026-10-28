@@ -129,6 +129,45 @@ describe('assertSeeked()', function () {
     });
 });
 
+describe('assertRateSet()', function () {
+    it('passes when the speed was set to anything', function () {
+        (new MediaPlayer)->setRate(1.5);
+
+        $this->bridge->assertRateSet();
+    });
+
+    it('matches the exact speed', function () {
+        (new MediaPlayer)->setRate(1.5);
+        (new MediaPlayer)->setRate(2.0);
+
+        $this->bridge->assertRateSet(2.0);
+    });
+
+    it('fails when the speed was never set', function () {
+        expect(fn () => $this->bridge->assertRateSet())
+            ->toThrow(AssertionFailedError::class);
+    });
+
+    it('fails when another speed was set, naming it', function () {
+        (new MediaPlayer)->setRate(1.5);
+
+        expect(fn () => $this->bridge->assertRateSet(2.0))
+            ->toThrow(AssertionFailedError::class, '1.5');
+    });
+});
+
+describe('play() options', function () {
+    it('sends the speed and where to start, with defaults', function () {
+        (new MediaPlayer)->play('/tmp/a.wav');
+        (new MediaPlayer)->play('/tmp/b.wav', ['rate' => 1.5, 'position' => 12.5]);
+
+        $calls = $this->bridge->callsTo('MediaPlayer.Play');
+
+        expect($calls[0]['params'])->toMatchArray(['rate' => 1.0, 'position' => 0.0])
+            ->and($calls[1]['params'])->toMatchArray(['rate' => 1.5, 'position' => 12.5]);
+    });
+});
+
 describe('assertNothingPlayed()', function () {
     it('passes when no play happened', function () {
         (new MediaPlayer)->getStatus();

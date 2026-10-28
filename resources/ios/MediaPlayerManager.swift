@@ -25,6 +25,9 @@ final class MediaPlayerManager: NSObject {
     private(set) var state: String = "idle"
 
     private var shouldLoop = false
+    /// How fast playback goes, 1.0 being normal speed. Kept across `play()`
+    /// calls until changed.
+    private var rate: Float = 1
     /// False while `player` belongs to a `video_player` surface (adopted via
     /// `adopt(player:)`): teardown then pauses and lets go instead of
     /// stripping the surface's item.
@@ -43,17 +46,47 @@ final class MediaPlayerManager: NSObject {
 
     // MARK: - Playback control
 
-    /// Start (or replace) playback. Returns false when the source can't be
-    /// resolved to a URL or the player can't be created.
+    /// Start (or replace) playback, from `position` seconds in (or where the
+    /// same source already is, when 0), at `rate` (1.0 = normal speed).
+    /// Returns false when the source can't be resolved to a URL or the player
+    /// can't be created.
     @discardableResult
-    func play(source: String, loop: Bool, volume: Float) -> Bool {
-        guard let player = preparePlayer(source: source, loop: loop, muted: false, autoplay: true) else {
+    func play(source: String, loop: Bool, volume: Float, rate: Float = 1, position: Double = 0) -> Bool {
+        guard let player = preparePlayer(source: source, loop: loop, muted: false, autoplay: false) else {
             return false
         }
 
         player.volume = max(0, min(1, volume))
+        self.rate = Self.clamped(rate)
+        player.defaultRate = self.rate
+
+        if position > 0 || state == "ended" {
+            player.seek(to: CMTime(seconds: max(0, position), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+
+        activateForPlayback()
+        player.play()
+        state = "playing"
 
         return true
+    }
+
+    /// Change how fast playback goes (1.0 = normal speed). A paused player
+    /// stays paused and picks the speed up when it resumes.
+    func setRate(_ rate: Float) {
+        self.rate = Self.clamped(rate)
+
+        guard let player = player else { return }
+
+        player.defaultRate = self.rate
+
+        if state == "playing" {
+            player.rate = self.rate
+        }
+    }
+
+    private static func clamped(_ rate: Float) -> Float {
+        max(0.25, min(4, rate))
     }
 
     /// Create the shared player for a source without necessarily starting it.
@@ -239,6 +272,23 @@ final class MediaPlayerManager: NSObject {
             try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("🎬 MediaPlayer: failed to configure audio session: \(error.localizedDescription)")
+        }
+    }
+
+    /// Headless playback can follow anything that changed the audio session,
+    /// such as a recording, which leaves it inactive (and on older
+    /// microphone plugins, playing out of the earpiece), so it puts the
+    /// session back to playback each time it starts.
+    private func activateForPlayback() {
+        let session = AVAudioSession.sharedInstance()
+
+        do {
+            if session.category != .playback {
+                try session.setCategory(.playback, mode: .moviePlayback)
+            }
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("🎬 MediaPlayer: failed to activate audio session: \(error.localizedDescription)")
         }
     }
 
