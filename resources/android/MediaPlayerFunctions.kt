@@ -158,7 +158,28 @@ object MediaPlayerFunctions {
      */
     class GetStatus(private val activity: FragmentActivity) : BridgeFunction {
         override fun execute(parameters: Map<String, Any>): Map<String, Any> {
-            return MediaPlayerManager.getStatus()
+            // ExoPlayer only answers on the thread it was created on (the
+            // main looper); read from the PHP thread it throws and the
+            // status would come back as zeros.
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                return MediaPlayerManager.getStatus()
+            }
+
+            var status: Map<String, Any>? = null
+            val latch = CountDownLatch(1)
+
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    status = MediaPlayerManager.getStatus()
+                } catch (e: Exception) {
+                    // Silent failure — fall through to the off-thread read
+                }
+                latch.countDown()
+            }
+
+            latch.await(1, TimeUnit.SECONDS)
+
+            return status ?: MediaPlayerManager.getStatus()
         }
     }
 
