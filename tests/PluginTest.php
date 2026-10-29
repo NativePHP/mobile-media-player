@@ -51,16 +51,47 @@ describe('Plugin Manifest', function () {
 
     it('registers the video_player component', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $component = collect($manifest['components'])->firstWhere('type', 'video_player');
 
-        expect($manifest['components'])->toHaveCount(1);
-
-        $component = $manifest['components'][0];
-
-        expect($component['type'])->toBe('video_player');
+        expect($component)->not->toBeNull();
         expect($component['element'])->toBe('NativePHP\\MediaPlayer\\Elements\\VideoPlayer');
         expect($component['blade'])->toBe('NativePHP\\MediaPlayer\\Components\\VideoPlayer');
         expect($component)->toHaveKeys(['android_renderer', 'ios_renderer', 'self_closing']);
         expect($component['self_closing'])->toBeTrue();
+    });
+
+    it('registers the animated_image component', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $component = collect($manifest['components'])->firstWhere('type', 'animated_image');
+
+        expect($component)->not->toBeNull();
+        expect($component['element'])->toBe('NativePHP\\MediaPlayer\\Elements\\AnimatedImage');
+        expect($component['blade'])->toBe('NativePHP\\MediaPlayer\\Components\\AnimatedImage');
+        expect($component['android_renderer'])->toBe('com.nativephp.plugins.media_player.ui.AnimatedImageRenderer');
+        expect($component['ios_renderer'])->toBe('MediaPlayerAnimatedImageRenderer');
+        expect($component['self_closing'])->toBeTrue();
+    });
+
+    it('pulls in the Coil GIF decoder for Android', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        // Core ships coil-compose but not the animated decoder, so without
+        // this dependency animated_image would render a still first frame.
+        expect($manifest['android']['dependencies']['implementation'])
+            ->toContain('io.coil-kt.coil3:coil-gif:3.1.0');
+    });
+
+    it('ships a renderer file for every component on both platforms', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $root = dirname($this->manifestPath);
+
+        foreach ($manifest['components'] as $component) {
+            $ios = $root.'/resources/ios/'.$component['ios_renderer'].'.swift';
+            $kotlin = $root.'/resources/android/ui/'.class_basename(str_replace('.', '\\', $component['android_renderer'])).'.kt';
+
+            expect(file_exists($ios))->toBeTrue("Missing iOS renderer for {$component['type']}: {$ios}");
+            expect(file_exists($kotlin))->toBeTrue("Missing Android renderer for {$component['type']}: {$kotlin}");
+        }
     });
 
     it('declares the fullscreen player activity', function () {
