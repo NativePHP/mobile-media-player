@@ -56,6 +56,12 @@
             "description": "Set playback volume (0.0 - 1.0)"
         },
         {
+            "name": "MediaPlayer.SetRate",
+            "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.SetRate",
+            "ios": "MediaPlayerFunctions.SetRate",
+            "description": "Set how fast playback goes (1.0 = normal speed)"
+        },
+        {
             "name": "MediaPlayer.GetStatus",
             "android": "com.nativephp.plugins.media_player.MediaPlayerFunctions.GetStatus",
             "ios": "MediaPlayerFunctions.GetStatus",
