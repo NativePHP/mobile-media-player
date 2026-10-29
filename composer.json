@@ -11,7 +11,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "nativephp/mobile": "^3.0 || ^4.0"
+        "nativephp/mobile": "^3.3.11 || ^4.6.1"
     },
     "require-dev": {
         "orchestra/testbench": "^10.0",
