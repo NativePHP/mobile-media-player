@@ -102,6 +102,42 @@ describe('Plugin Manifest', function () {
         expect($names)->toContain('com.nativephp.plugins.media_player.FullscreenPlayerActivity');
     });
 
+    it('declares the Android playback service as a Media3 session service', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $services = collect($manifest['android']['services'])->keyBy('name');
+        $service = $services['com.nativephp.plugins.media_player.MediaPlaybackService'] ?? null;
+
+        // Media3 finds the service through this intent filter, and Android 14+
+        // refuses to run it in the foreground without the mediaPlayback type.
+        expect($service)->not->toBeNull()
+            ->and($service['exported'])->toBeTrue()
+            ->and($service['foregroundServiceType'])->toBe('mediaPlayback')
+            ->and($service['intent_filters'][0]['action'])->toBe('androidx.media3.session.MediaSessionService');
+
+        expect(file_exists(dirname($this->manifestPath).'/resources/android/MediaPlaybackService.kt'))->toBeTrue();
+    });
+
+    it('asks for the permissions a media playback service needs', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        expect($manifest['android']['permissions'])
+            ->toContain('android.permission.FOREGROUND_SERVICE')
+            ->toContain('android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK')
+            ->toContain('android.permission.WAKE_LOCK');
+    });
+
+    it('pulls in Media3 session at the same version as the rest of Media3', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $media3 = array_values(array_filter(
+            $manifest['android']['dependencies']['implementation'],
+            fn (string $dependency) => str_starts_with($dependency, 'androidx.media3:'),
+        ));
+
+        expect($media3)->toContain('androidx.media3:media3-session:1.5.1')
+            ->and(array_unique(array_map(fn (string $dependency) => substr(strrchr($dependency, ':'), 1), $media3)))
+            ->toHaveCount(1);
+    });
+
     it('registers events', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
 

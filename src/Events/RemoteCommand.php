@@ -8,15 +8,16 @@ use Native\Mobile\Events\Contracts\DispatchableFromNative;
 
 /**
  * Fired when the user drives playback from outside the app — the lock screen,
- * Control Center, the Dynamic Island, headphone controls or CarPlay.
+ * Control Center, the Dynamic Island, the Android media notification,
+ * headphone controls or CarPlay.
  *
  * The native side has already applied the command to the shared player by the
  * time this reaches PHP, so handlers exist to reconcile in-app UI rather than
  * to perform the action.
  *
- * `$command` is one of `play`, `pause` or `stop`. Note that live streams never
- * report `pause`: the system renders a stop button for live content, so a live
- * halt arrives as `stop`.
+ * `$command` is one of `play`, `pause` or `stop`. Note that on iOS live streams
+ * never report `pause`: the system renders a stop button for live content, so a
+ * live halt arrives as `stop`. Android shows pause for live content too.
  */
 class RemoteCommand implements DispatchableFromNative
 {
