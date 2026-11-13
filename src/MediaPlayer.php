@@ -8,18 +8,33 @@ class MediaPlayer
      * Start (or replace) playback of a file path or URL on the shared player,
      * from `position` seconds in, at `rate` (1.0 is normal speed, 2.0 twice as fast).
      *
-     * @param  array{loop?: bool, volume?: float, rate?: float, position?: float}  $options
+     * `title`, `artist` and `artwork` populate the system's Now Playing
+     * display — the lock screen, Control Center and the Dynamic Island — and
+     * enable its transport controls. `artwork` may be a remote URL or a local
+     * file path; remote artwork is fetched in the background and applied when
+     * it arrives, so playback never waits on it.
+     *
+     * `timeout` is how many seconds to wait for sound before giving up: the
+     * player is released and a PlaybackError fires. Without it a source that
+     * never starts (a dead server, a format the device cannot decode) keeps
+     * the player loading forever.
+     *
+     * @param  array{loop?: bool, volume?: float, rate?: float, position?: float, timeout?: float, title?: string, artist?: string, artwork?: string}  $options
      */
     public function play(string $source, array $options = []): bool
     {
         if (function_exists('nativephp_call')) {
-            $result = nativephp_call('MediaPlayer.Play', json_encode([
+            $result = nativephp_call('MediaPlayer.Play', json_encode(array_filter([
                 'source' => $source,
                 'loop' => (bool) ($options['loop'] ?? false),
                 'volume' => (float) ($options['volume'] ?? 1.0),
                 'rate' => (float) ($options['rate'] ?? 1.0),
                 'position' => max(0.0, (float) ($options['position'] ?? 0.0)),
-            ]));
+                'timeout' => isset($options['timeout']) ? max(0.0, (float) $options['timeout']) : null,
+                'title' => $options['title'] ?? null,
+                'artist' => $options['artist'] ?? null,
+                'artwork' => $options['artwork'] ?? null,
+            ], fn ($value) => $value !== null)));
 
             if ($result) {
                 $decoded = json_decode($result, true);

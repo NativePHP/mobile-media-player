@@ -102,11 +102,61 @@ describe('Plugin Manifest', function () {
         expect($names)->toContain('com.nativephp.plugins.media_player.FullscreenPlayerActivity');
     });
 
+    it('declares the Android playback service as a Media3 session service', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $services = collect($manifest['android']['services'])->keyBy('name');
+        $service = $services['com.nativephp.plugins.media_player.MediaPlaybackService'] ?? null;
+
+        // Media3 finds the service through this intent filter, and Android 14+
+        // refuses to run it in the foreground without the mediaPlayback type.
+        expect($service)->not->toBeNull()
+            ->and($service['exported'])->toBeTrue()
+            ->and($service['foregroundServiceType'])->toBe('mediaPlayback')
+            ->and($service['intent_filters'][0]['action'])->toBe('androidx.media3.session.MediaSessionService');
+
+        expect(file_exists(dirname($this->manifestPath).'/resources/android/MediaPlaybackService.kt'))->toBeTrue();
+    });
+
+    it('asks for the permissions a media playback service needs', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        expect($manifest['android']['permissions'])
+            ->toContain('android.permission.FOREGROUND_SERVICE')
+            ->toContain('android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK')
+            ->toContain('android.permission.WAKE_LOCK');
+    });
+
+    it('pulls in Media3 session at the same version as the rest of Media3', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+        $media3 = array_values(array_filter(
+            $manifest['android']['dependencies']['implementation'],
+            fn (string $dependency) => str_starts_with($dependency, 'androidx.media3:'),
+        ));
+
+        // Headless playback runs on ExoPlayer, which only plays HLS (.m3u8)
+        // live streams with the HLS module; without it the media source
+        // factory is missing at runtime and play() throws.
+        expect($media3)->toContain('androidx.media3:media3-session:1.5.1')
+            ->toContain('androidx.media3:media3-exoplayer-hls:1.5.1')
+            ->and(array_unique(array_map(fn (string $dependency) => substr(strrchr($dependency, ':'), 1), $media3)))
+            ->toHaveCount(1);
+    });
+
     it('registers events', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
 
         expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\PlaybackEnded');
         expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\PlaybackError');
+        expect($manifest['events'])->toContain('NativePHP\\MediaPlayer\\Events\\RemoteCommand');
+    });
+
+    it('leaves the audio background mode to the consuming app', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        // Declaring UIBackgroundModes here would force it on every consumer,
+        // and Apple rejects apps that claim a background mode they don't use.
+        // A video-only app must not inherit background audio from this plugin.
+        expect($manifest['ios']['background_modes'] ?? [])->not->toContain('audio');
     });
 });
 
@@ -130,6 +180,32 @@ describe('Native Code', function () {
 
         expect($functions)->toContain('package com.nativephp.plugins.media_player');
         expect($renderer)->toContain('package com.nativephp.plugins.media_player.ui');
+    });
+});
+
+describe('Start checks', function () {
+    it('passes the start timeout through to both platforms', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerFunctions.swift');
+        $kotlin = file_get_contents($this->pluginPath.'/resources/android/MediaPlayerFunctions.kt');
+
+        expect($swift)->toContain('parameters["timeout"]')->toContain('startTimeout: timeout');
+        expect($kotlin)->toContain('parameters["timeout"]');
+    });
+
+    it('refuses the stream types AVPlayer never starts on iOS', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerManager.swift');
+
+        foreach (['application/ogg', 'audio/ogg', 'audio/opus', 'audio/webm'] as $type) {
+            expect($swift)->toContain('"'.$type.'"');
+        }
+    });
+
+    it('stands the watchdog down once sound starts on both platforms', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerManager.swift');
+        $kotlin = file_get_contents($this->pluginPath.'/resources/android/MediaPlayerManager.kt');
+
+        expect($swift)->toContain('timeControlStatus == .playing');
+        expect($kotlin)->toContain('override fun onIsPlayingChanged');
     });
 });
 
@@ -166,6 +242,11 @@ describe('PHP Classes', function () {
 
     it('has PlaybackError event', function () {
         $file = $this->pluginPath.'/src/Events/PlaybackError.php';
+        expect(file_exists($file))->toBeTrue();
+    });
+
+    it('has RemoteCommand event', function () {
+        $file = $this->pluginPath.'/src/Events/RemoteCommand.php';
         expect(file_exists($file))->toBeTrue();
     });
 });

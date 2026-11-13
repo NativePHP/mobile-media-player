@@ -18,6 +18,8 @@ enum MediaPlayerFunctions {
     ///   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
     ///   - rate: (optional) float - How fast it plays, 1.0 being normal speed (default: 1.0)
     ///   - position: (optional) float - Seconds in to start from (default: 0)
+    ///   - timeout: (optional) float - Seconds to wait for sound before giving up
+    ///     with a PlaybackError (default: 0, wait forever)
     /// Returns:
     ///   - success: boolean - True if playback started
     /// Events:
@@ -33,6 +35,13 @@ enum MediaPlayerFunctions {
             let volume = (parameters["volume"] as? NSNumber)?.floatValue ?? 1.0
             let rate = (parameters["rate"] as? NSNumber)?.floatValue ?? 1.0
             let position = (parameters["position"] as? NSNumber)?.doubleValue ?? 0
+            let timeout = (parameters["timeout"] as? NSNumber)?.doubleValue ?? 0
+
+            // Optional now-playing metadata for the lock screen, Control
+            // Center and Dynamic Island.
+            let title = parameters["title"] as? String
+            let artist = parameters["artist"] as? String
+            let artwork = parameters["artwork"] as? String
 
             print("🎬 Starting media playback: \(source)")
 
@@ -40,7 +49,17 @@ enum MediaPlayerFunctions {
             let semaphore = DispatchSemaphore(value: 0)
 
             DispatchQueue.main.async {
-                success = MediaPlayerManager.shared.play(source: source, loop: loop, volume: volume, rate: rate, position: position)
+                success = MediaPlayerManager.shared.play(
+                    source: source,
+                    loop: loop,
+                    volume: volume,
+                    rate: rate,
+                    position: position,
+                    title: title,
+                    artist: artist,
+                    artwork: artwork,
+                    startTimeout: timeout
+                )
                 semaphore.signal()
             }
 

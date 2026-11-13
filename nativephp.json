@@ -76,6 +76,11 @@
     ],
     "android": {
         "min_version": 26,
+        "permissions": [
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+            "android.permission.WAKE_LOCK"
+        ],
         "activities": [
             {
                 "name": "com.nativephp.plugins.media_player.FullscreenPlayerActivity",
@@ -83,10 +88,24 @@
                 "configChanges": "orientation|screenSize|keyboardHidden"
             }
         ],
+        "services": [
+            {
+                "name": "com.nativephp.plugins.media_player.MediaPlaybackService",
+                "exported": true,
+                "foregroundServiceType": "mediaPlayback",
+                "intent_filters": [
+                    {
+                        "action": "androidx.media3.session.MediaSessionService"
+                    }
+                ]
+            }
+        ],
         "dependencies": {
             "implementation": [
                 "androidx.media3:media3-exoplayer:1.5.1",
+                "androidx.media3:media3-exoplayer-hls:1.5.1",
                 "androidx.media3:media3-ui:1.5.1",
+                "androidx.media3:media3-session:1.5.1",
                 "io.coil-kt.coil3:coil-gif:3.1.0"
             ]
         }
@@ -101,6 +120,7 @@
     },
     "events": [
         "NativePHP\\MediaPlayer\\Events\\PlaybackEnded",
-        "NativePHP\\MediaPlayer\\Events\\PlaybackError"
+        "NativePHP\\MediaPlayer\\Events\\PlaybackError",
+        "NativePHP\\MediaPlayer\\Events\\RemoteCommand"
     ]
 }

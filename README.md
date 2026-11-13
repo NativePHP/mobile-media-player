@@ -6,7 +6,7 @@ Audio/video playback for NativePHP Mobile: a shared background player driven fro
 
 The plugin provides three ways to play media:
 
-- **Shared player** — `MediaPlayer::play()` plays audio or video sources app-wide (AVPlayer on iOS, MediaPlayer on Android) with pause/resume/seek/volume control from PHP.
+- **Shared player** — `MediaPlayer::play()` plays audio or video sources app-wide (AVPlayer on iOS, Media3 ExoPlayer on Android) with pause/resume/seek/volume control from PHP.
 - **Full-screen presentation** — `MediaPlayer::present()` opens the system player UI (AVPlayerViewController on iOS, a dedicated full-screen activity on Android); the user dismisses it natively.
 - **Inline `<video-player>` element** — a video surface for native UI views, rendered as SwiftUI `VideoPlayer` (AVKit) on iOS and a `VideoView` inside Compose on Android.
 - **Inline `<animated-image>` element** — animated GIF / APNG / WebP, rendered through ImageIO on iOS and Coil's animated decoder on Android. Costs no playback session, so a list can hold many at once.
@@ -53,6 +53,92 @@ $status = MediaPlayer::getStatus();
 
 `play()` and `present()` return `false` when the source can't be started (or when
 running outside the native runtime).
+
+#### Sources that never start
+
+Some sources never fail, they just load forever: a server that accepts the
+connection but sends no audio, or a format the device cannot decode. Pass a
+`timeout` to give up on them:
+
+```php
+MediaPlayer::play('https://example.com/stream', ['timeout' => 15]);
+```
+
+If no sound comes within that many seconds, the player is released, its
+status becomes `error` and a `PlaybackError` fires ("No sound after 15
+seconds."). Once sound has started, later rebuffering does not count. Without
+a `timeout` the player waits forever, as before.
+
+Formats are also checked per platform:
+
+- **iOS**: AVPlayer waits forever on an Ogg, Opus or WebM stream, even though
+  AVFoundation lists Ogg as playable. For an `http(s)` source the plugin reads
+  the server's `Content-Type` alongside playback and, for one of those types,
+  stops and fires a `PlaybackError` straight away, with or without a `timeout`.
+- **Android**: ExoPlayer reports a format it cannot parse itself, as a
+  `PlaybackError`. It plays Ogg (Vorbis, Opus, FLAC) streams.
+
+### Now Playing (lock screen, Control Center, Dynamic Island, media notification)
+
+Pass `title`, `artist` and `artwork` to `play()` to populate the system's Now
+Playing display and enable its transport controls. On Android this is the media
+notification, which the lock screen also shows:
+
+```php
+MediaPlayer::play('https://example.com/live.m3u8', [
+    'title' => 'The Platform',
+    'artist' => 'Live stream',
+    'artwork' => 'https://example.com/logo.png', // remote URL or local path
+]);
+```
+
+Remote artwork is fetched in the background and applied when it arrives, so
+playback never waits on it. Omit any key to leave it unset.
+
+#### Background audio is the app's decision
+
+The plugin does **not** declare the `audio` background mode, because Apple
+rejects apps that claim a background mode they don't use — a video-only app must
+not inherit it. Audio stops when your app is backgrounded until you opt in, in
+your own app's `config/nativephp.php`:
+
+```php
+'permissions' => [
+    'UIBackgroundModes' => ['audio'],
+],
+```
+
+> Note that the iOS **simulator** keeps playing audio in the background whether
+> or not you declare this. Verify on a physical device.
+
+#### Android
+
+Headless playback runs in a Media3 `MediaSessionService`, so it keeps playing in
+the background with no setup in your app. The plugin declares the service and
+the `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and `WAKE_LOCK`
+permissions.
+
+> Google Play asks every app that targets Android 14+ and declares
+> `FOREGROUND_SERVICE_MEDIA_PLAYBACK` to explain its use in the Play Console.
+
+The player also pauses when headphones are unplugged or another app takes
+audio focus (a phone call, for example). Both arrive as `RemoteCommand('pause')`.
+
+#### Live streams
+
+A source whose duration is not finite is published as a live stream, which makes
+iOS render a "LIVE" badge with no scrubber. Two consequences worth knowing:
+
+- The system shows a **stop** button rather than pause/play, so a live halt
+  arrives as `RemoteCommand('stop')` — `pause` is never reported for live audio.
+- Stopping from the lock screen releases the player (a live buffer is stale the
+  moment it stops) but keeps the Now Playing card, so the user can start again
+  from the lock screen. Pressing play rejoins at the live edge rather than
+  resuming a stale buffer.
+
+On Android the notification shows pause/play for live streams too, so a live
+halt arrives as `RemoteCommand('pause')`. Pressing play again rejoins at the
+live edge.
 
 ### Full-screen system player
 
@@ -168,7 +254,9 @@ public function handlePlaybackEnded(string $source)
 
 ### `PlaybackError`
 
-Fired when the shared player fails to load or play a source.
+Fired when the shared player fails to load or play a source, including a
+start that times out or a stream type the device cannot play (see
+[Sources that never start](#sources-that-never-start)).
 
 **Payload:** `string $source`, `string $message`
 
@@ -182,6 +270,31 @@ public function handlePlaybackError(string $source, string $message)
     $this->status = "Playback failed: {$message}";
 }
 ```
+
+### `RemoteCommand`
+
+Fired when the user drives playback from outside the app — the lock screen,
+Control Center, the Dynamic Island, the Android media notification, headphone
+controls or CarPlay.
+
+The native side has already applied the command to the shared player by the time
+this reaches PHP, so handlers exist to reconcile your UI, not to perform the
+action.
+
+**Payload:** `string $command` (`play`, `pause` or `stop`), `string $source`
+
+```php
+use Native\Mobile\Attributes\On;
+use NativePHP\MediaPlayer\Events\RemoteCommand;
+
+#[On(RemoteCommand::class)]
+public function handleRemoteCommand(string $command, string $source)
+{
+    $this->playing = $command === 'play';
+}
+```
+
+Live streams never report `pause` — see [Live streams](#live-streams).
 
 ## Status values
 
@@ -234,7 +347,7 @@ The helpers are available on `Native::fakeBridge()` and chain directly off `Nati
 ## Platform Support
 
 - **iOS:** 16.0+ (AVPlayer / AVKit; ImageIO for `animated-image`)
-- **Android:** API 26+ (MediaPlayer / Media3 UI; Coil `AnimatedImageDecoder` on API 28+, `GifDecoder` below; `android.media.MediaPlayer` for headless playback)
+- **Android:** API 26+ (MediaPlayer / Media3 UI; Coil `AnimatedImageDecoder` on API 28+, `GifDecoder` below; Media3 ExoPlayer and `MediaSessionService` for headless playback)
 
 ## Notes
 

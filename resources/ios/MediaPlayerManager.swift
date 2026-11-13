@@ -1,5 +1,7 @@
 import AVFoundation
 import Foundation
+import MediaPlayer
+import UIKit
 
 /// MediaPlayerManager owns the shared AVPlayer used by the headless
 /// `MediaPlayer.*` bridge functions and by the `video_player` element
@@ -40,6 +42,26 @@ final class MediaPlayerManager: NSObject {
     private var failObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
 
+    // Now Playing metadata for the lock screen / Control Center.
+    private var nowPlayingTitle: String?
+    private var nowPlayingArtist: String?
+    private var nowPlayingArtwork: MPMediaItemArtwork?
+    private var artworkTask: URLSessionDataTask?
+    private var remoteCommandsRegistered = false
+
+    /// Survives teardown() so the lock screen can start playback again after a
+    /// stop. `source` is nil'd by teardown; this is not.
+    private var lastSource: String?
+    private var lastLoop = false
+    private var lastVolume: Float = 1.0
+    private var lastStartTimeout: Double = 0
+
+    // Start checks: AVPlayer never fails some sources, it just waits on them
+    // forever. These turn that silence into a PlaybackError.
+    private var startWatchdog: DispatchWorkItem?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var streamTypeProbe: StreamTypeProbe?
+
     private override init() {
         super.init()
     }
@@ -51,7 +73,28 @@ final class MediaPlayerManager: NSObject {
     /// Returns false when the source can't be resolved to a URL or the player
     /// can't be created.
     @discardableResult
-    func play(source: String, loop: Bool, volume: Float, rate: Float = 1, position: Double = 0) -> Bool {
+    func play(
+        source: String,
+        loop: Bool,
+        volume: Float,
+        rate: Float = 1,
+        position: Double = 0,
+        title: String? = nil,
+        artist: String? = nil,
+        artwork: String? = nil,
+        startTimeout: Double = 0
+    ) -> Bool {
+        // Stash metadata before preparing, so the first now-playing publish
+        // already carries it.
+        nowPlayingTitle = title
+        nowPlayingArtist = artist
+        nowPlayingArtwork = nil
+
+        lastSource = source
+        lastLoop = loop
+        lastVolume = max(0, min(1, volume))
+        lastStartTimeout = max(0, startTimeout)
+
         guard let player = preparePlayer(source: source, loop: loop, muted: false, autoplay: false) else {
             return false
         }
@@ -68,6 +111,12 @@ final class MediaPlayerManager: NSObject {
         player.play()
         state = "playing"
 
+        registerRemoteCommands()
+        updateNowPlayingInfo()
+        loadArtwork(from: artwork)
+
+        armStartChecks(player: player, source: source)
+
         return true
     }
 
@@ -83,6 +132,8 @@ final class MediaPlayerManager: NSObject {
         if state == "playing" {
             player.rate = self.rate
         }
+
+        updateNowPlayingInfo()
     }
 
     private static func clamped(_ rate: Float) -> Float {
@@ -151,6 +202,7 @@ final class MediaPlayerManager: NSObject {
 
         teardown()
         configureAudioSession()
+        clearNowPlaying()
 
         self.player = player
         self.source = source
@@ -198,6 +250,7 @@ final class MediaPlayerManager: NSObject {
         guard let player = player, state == "playing" else { return }
         player.pause()
         state = "paused"
+        updateNowPlayingInfo()
     }
 
     func resume() {
@@ -207,6 +260,7 @@ final class MediaPlayerManager: NSObject {
         }
         player.play()
         state = "playing"
+        updateNowPlayingInfo()
     }
 
     func stop() {
@@ -214,6 +268,24 @@ final class MediaPlayerManager: NSObject {
         state = "idle"
         stoppedByFacade = true
         notifySlotChanged()
+        updateNowPlayingInfo()
+        releaseAudioSession()
+    }
+
+    private func releaseAudioSession() {
+        // Clearing nowPlayingInfo alone is not enough to dismiss the lock
+        // screen card — iOS keeps showing a stale one, with dead transport
+        // buttons, until the audio session is released. Deactivating also
+        // hands the Now Playing slot back to whatever was playing before us.
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("🎬 MediaPlayer: failed to deactivate audio session: \(error.localizedDescription)")
+        }
+
+        // The session is no longer active, so the next surface adoption must
+        // set it up again rather than trust the once-per-process flag.
+        audioSessionConfigured = false
     }
 
     func seek(to seconds: Double) {
@@ -253,6 +325,281 @@ final class MediaPlayerManager: NSObject {
 
     private func notifySlotChanged() {
         NotificationCenter.default.post(name: Self.slotDidChange, object: self)
+    }
+
+    // MARK: - Now Playing
+
+    /// Publish the current playback state to the system so it appears on the
+    /// lock screen, in Control Center and in the Dynamic Island.
+    ///
+    /// A live stream is flagged with MPNowPlayingInfoPropertyIsLiveStream,
+    /// which is what makes iOS render a "LIVE" badge with no scrubber.
+    func updateNowPlayingInfo() {
+        guard state != "idle" else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+            return
+        }
+
+        var info: [String: Any] = [:]
+
+        info[MPMediaItemPropertyTitle] = nowPlayingTitle ?? "Live stream"
+        if let artist = nowPlayingArtist {
+            info[MPMediaItemPropertyArtist] = artist
+        }
+        if let artwork = nowPlayingArtwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
+
+        let duration = player?.currentItem?.duration.seconds
+        let isLive = !(duration?.isFinite ?? false)
+
+        info[MPNowPlayingInfoPropertyIsLiveStream] = isLive
+
+        // Positional keys are published for live content too, as zeroes: the
+        // LIVE badge comes from the IsLiveStream flag, not from their absence,
+        // and supplying them keeps the dictionary well-formed for the system's
+        // other Now Playing surfaces. AVPlayer reports a non-finite time
+        // before the first sample is ready, hence the isFinite guard.
+        let elapsed = player?.currentTime().seconds ?? 0
+
+        info[MPMediaItemPropertyPlaybackDuration] = isLive ? 0 : (duration ?? 0)
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed.isFinite ? elapsed : 0
+        // Report the real speed, so the lock screen's progress bar keeps
+        // pace when playback runs faster or slower than normal.
+        info[MPNowPlayingInfoPropertyPlaybackRate] = state == "playing" ? Double(rate) : 0.0
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = Double(rate)
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        // State the playback state outright rather than leaving the system to
+        // infer it from the audio session alone.
+        MPNowPlayingInfoCenter.default().playbackState = state == "playing" ? .playing : .paused
+
+    }
+
+    /// Fetch remote artwork off the main thread, then republish. Local paths
+    /// are loaded directly.
+    private func loadArtwork(from source: String?) {
+        artworkTask?.cancel()
+        artworkTask = nil
+
+        guard let source = source, !source.isEmpty, let url = Self.resolveURL(source) else {
+            return
+        }
+
+        if url.isFileURL {
+            if let image = UIImage(contentsOfFile: url.path) {
+                setArtwork(image)
+            }
+            return
+        }
+
+        artworkTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let data = data, let image = UIImage(data: data) else { return }
+            DispatchQueue.main.async { self?.setArtwork(image) }
+        }
+        artworkTask?.resume()
+    }
+
+    /// Forget the headless track's metadata and take its card off the lock
+    /// screen. Used when a `video_player` surface takes the shared slot: the
+    /// card would otherwise keep showing the track that was replaced.
+    private func clearNowPlaying() {
+        artworkTask?.cancel()
+        artworkTask = nil
+        nowPlayingTitle = nil
+        nowPlayingArtist = nil
+        nowPlayingArtwork = nil
+        lastSource = nil
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
+    }
+
+    private func setArtwork(_ image: UIImage) {
+        nowPlayingArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        updateNowPlayingInfo()
+    }
+
+    // MARK: - Remote commands
+
+    /// Wire the lock screen / Control Center / Dynamic Island transport
+    /// buttons. Each handler drives the player natively for instant feedback
+    /// *and* notifies PHP so the in-app UI reconciles.
+    ///
+    /// Registered lazily on first play: registering at launch would claim the
+    /// now-playing slot before there is anything to play.
+    private func registerRemoteCommands() {
+        guard !remoteCommandsRegistered else { return }
+        remoteCommandsRegistered = true
+
+        let centre = MPRemoteCommandCenter.shared()
+
+        centre.playCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .noSuchContent }
+            guard self.startFromRemote() else { return .noSuchContent }
+            self.updateNowPlayingInfo()
+            self.dispatchRemoteCommand("play")
+            return .success
+        }
+
+        centre.pauseCommand.addTarget { [weak self] _ in
+            guard let self = self, self.player != nil else { return .noSuchContent }
+            self.pause()
+            self.updateNowPlayingInfo()
+            self.dispatchRemoteCommand("pause")
+            return .success
+        }
+
+        centre.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .noSuchContent }
+
+            if self.state == "playing" {
+                // Live content has no useful paused state — halt it the same
+                // way the stop button does, so both routes behave alike.
+                let isLive = !(self.player?.currentItem?.duration.seconds.isFinite ?? false)
+
+                if isLive {
+                    self.haltForRemote()
+                    self.dispatchRemoteCommand("stop")
+                } else {
+                    self.pause()
+                    self.updateNowPlayingInfo()
+                    self.dispatchRemoteCommand("pause")
+                }
+
+                return .success
+            }
+
+            guard self.startFromRemote() else { return .noSuchContent }
+            self.updateNowPlayingInfo()
+            self.dispatchRemoteCommand("play")
+            return .success
+        }
+
+        centre.stopCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .noSuchContent }
+            self.haltForRemote()
+            self.dispatchRemoteCommand("stop")
+            return .success
+        }
+
+        // Deliberately left disabled: we want to observe whether iOS offers
+        // skip affordances for live content when they are not enabled.
+        centre.nextTrackCommand.isEnabled = false
+        centre.previousTrackCommand.isEnabled = false
+        centre.changePlaybackPositionCommand.isEnabled = false
+
+    }
+
+    /// Handle the lock screen's stop button.
+    ///
+    /// Because a live stream is published with MPNowPlayingInfoPropertyIsLiveStream,
+    /// iOS renders a stop button rather than pause/play — pausing live content
+    /// is meaningless, so there is no pause command to receive. Treat that stop
+    /// as "halt, but stay resumable":
+    ///
+    ///   - tear the player down, because a live buffer is stale the moment it
+    ///     stops and resuming it would leave us behind the live edge;
+    ///   - keep the Now Playing card, in the paused state, so the user still
+    ///     has something to press to come back;
+    ///   - keep the audio session active, since deactivating it hands the Now
+    ///     Playing slot to whatever played before us and the card disappears.
+    ///
+    /// `stop()` remains the hard stop for a PHP-initiated MediaPlayer::stop().
+    private func haltForRemote() {
+        teardown()
+
+        // Not "idle": that is the state updateNowPlayingInfo() treats as
+        // "clear the card entirely".
+        state = "paused"
+
+        // The user stopped playback, so a video_player surface must not
+        // quietly take the empty slot and start playing.
+        stoppedByFacade = true
+        notifySlotChanged()
+
+        updateNowPlayingInfo()
+    }
+
+    /// Start playback in response to a remote (lock screen / Control Center /
+    /// Dynamic Island) play press, from whatever state we are in.
+    ///
+    /// The player may be paused *or* fully torn down: `stop()` releases it, so
+    /// there is nothing to resume. Falling back to `lastSource` lets the lock
+    /// screen restart a stopped stream instead of silently doing nothing.
+    ///
+    /// Returns false only when we have never been given a source to play.
+    @discardableResult
+    private func startFromRemote() -> Bool {
+        if player != nil {
+            resumeOrRejoinLive()
+            return true
+        }
+
+        guard let source = lastSource else {
+            return false
+        }
+
+        return play(
+            source: source,
+            loop: lastLoop,
+            volume: lastVolume,
+            rate: rate,
+            title: nowPlayingTitle,
+            artist: nowPlayingArtist,
+            startTimeout: lastStartTimeout
+        )
+    }
+
+    /// Resume on-demand media; jump to the live edge for a live stream.
+    ///
+    /// AVPlayer resumes a paused item from its stalled buffer. For on-demand
+    /// media that is right; for a live stream the buffer is stale the moment
+    /// you pause, so a plain resume plays nothing or leaves you behind live.
+    ///
+    /// We deliberately do NOT tear the player down and rebuild it: while the
+    /// app is backgrounded, the `audio` background mode only keeps us alive so
+    /// long as audio is actually playing. A teardown creates a silent gap, and
+    /// iOS can suspend us inside it before the replacement player starts.
+    /// Seeking the existing item to the end of its seekable range rejoins live
+    /// without ever dropping the audio session.
+    private func resumeOrRejoinLive() {
+        guard let player = player, let item = player.currentItem else {
+            return
+        }
+
+        let duration = item.duration.seconds
+        let isLive = !duration.isFinite
+
+        guard isLive else {
+            resume()
+            return
+        }
+
+        guard let liveRange = item.seekableTimeRanges.last?.timeRangeValue else {
+            // No seekable range yet (buffer fully drained). Nothing sensible
+            // to seek to, so just start the existing item and let AVFoundation
+            // refill from the playlist.
+            player.play()
+            state = "playing"
+            return
+        }
+
+        let liveEdge = CMTimeRangeGetEnd(liveRange)
+        player.seek(to: liveEdge, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            player.play()
+            self?.state = "playing"
+            self?.updateNowPlayingInfo()
+        }
+
+        state = "playing"
+    }
+
+    private func dispatchRemoteCommand(_ command: String) {
+        let payload: [String: Any] = ["command": command, "source": source ?? ""]
+        print("📤 Dispatching RemoteCommand \(command)")
+        LaravelBridge.shared.send?("NativePHP\\MediaPlayer\\Events\\RemoteCommand", payload)
     }
 
     // MARK: - Helpers
@@ -341,6 +688,7 @@ final class MediaPlayerManager: NSObject {
         }
 
         state = "ended"
+        updateNowPlayingInfo()
 
         let payload: [String: Any] = ["source": source ?? ""]
         print("📤 Dispatching PlaybackEnded with source=\(source ?? "nil")")
@@ -349,6 +697,7 @@ final class MediaPlayerManager: NSObject {
 
     private func handleError(message: String) {
         state = "error"
+        updateNowPlayingInfo()
         dispatchError(source: source ?? "", message: message)
     }
 
@@ -361,7 +710,87 @@ final class MediaPlayerManager: NSObject {
         LaravelBridge.shared.send?("NativePHP\\MediaPlayer\\Events\\PlaybackError", payload)
     }
 
+    // MARK: - Start checks
+
+    /// Stream types AVPlayer accepts but never starts. AVFoundation reports
+    /// Ogg as playable (`isPlayableExtendedMIMEType` says yes), yet an Ogg
+    /// stream (an Icecast Ogg FLAC station, for one) sits loading forever on
+    /// a device, with no error and no item failure.
+    private static let unplayableStreamTypes: Set<String> = [
+        "application/ogg",
+        "audio/ogg",
+        "audio/opus",
+        "audio/webm",
+        "video/webm",
+    ]
+
+    /// Watch a freshly started headless source for the two silent failures:
+    /// a stream type AVPlayer cannot start (checked against the response's
+    /// Content-Type, alongside playback so a good stream never waits), and,
+    /// when a start timeout is set, no sound at all within it.
+    private func armStartChecks(player: AVPlayer, source: String) {
+        // play() may restart the source already held, without a teardown.
+        disarmStartChecks()
+        streamTypeProbe?.cancel()
+        streamTypeProbe = nil
+
+        if let url = Self.resolveURL(source), url.scheme == "http" || url.scheme == "https" {
+            streamTypeProbe = StreamTypeProbe(url: url) { [weak self] mimeType in
+                guard let self = self, self.source == source, let mimeType = mimeType else { return }
+
+                if Self.unplayableStreamTypes.contains(mimeType) {
+                    self.failStart(source: source, message: "This device cannot play \(mimeType) streams.")
+                }
+            }
+        }
+
+        guard lastStartTimeout > 0 else { return }
+
+        let seconds = lastStartTimeout
+
+        // Sound has started once the player's clock runs; a later stall is
+        // rebuffering, not a failed start, so the watchdog stands down.
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            if player.timeControlStatus == .playing {
+                DispatchQueue.main.async { self?.disarmStartChecks() }
+            }
+        }
+
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self = self, self.source == source, self.state == "playing" else { return }
+            self.failStart(source: source, message: "No sound after \(Self.formatSeconds(seconds)) seconds.")
+        }
+        startWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: watchdog)
+    }
+
+    private func disarmStartChecks() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+    }
+
+    /// Give up on a source that will never play: release it as `stop()`
+    /// would, but leave the state at "error" and say why.
+    private func failStart(source: String, message: String) {
+        teardown()
+        state = "error"
+        notifySlotChanged()
+        updateNowPlayingInfo()
+        releaseAudioSession()
+        dispatchError(source: source, message: message)
+    }
+
+    private static func formatSeconds(_ seconds: Double) -> String {
+        seconds.rounded() == seconds ? String(Int(seconds)) : String(seconds)
+    }
+
     private func teardown() {
+        disarmStartChecks()
+        streamTypeProbe?.cancel()
+        streamTypeProbe = nil
+
         if let endObserver = endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
@@ -381,5 +810,51 @@ final class MediaPlayerManager: NSObject {
         source = nil
         shouldLoop = false
         ownsPlayer = true
+    }
+}
+
+/// Reads the Content-Type a server sends for a URL and hangs up: a live
+/// stream never ends, so only the response headers are fetched.
+private final class StreamTypeProbe: NSObject, URLSessionDataDelegate {
+    private var session: URLSession?
+    private var completion: ((String?) -> Void)?
+
+    init(url: URL, completion: @escaping (String?) -> Void) {
+        self.completion = completion
+        super.init()
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+        self.session = session
+        session.dataTask(with: url).resume()
+    }
+
+    func cancel() {
+        completion = nil
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        completionHandler(.cancel)
+        finish(response.mimeType?.lowercased())
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // Unreachable or refused: say nothing, the start timeout covers it.
+        finish(nil)
+    }
+
+    private func finish(_ mimeType: String?) {
+        let completion = self.completion
+        cancel()
+        completion?(mimeType)
     }
 }

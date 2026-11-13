@@ -22,11 +22,18 @@ object MediaPlayerFunctions {
      *   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
      *   - rate: (optional) float - How fast it plays, 1.0 being normal speed (default: 1.0)
      *   - position: (optional) float - Seconds in to start from (default: 0)
+     *   - timeout: (optional) float - Seconds to wait for sound before giving up
+     *     with a PlaybackError (default: 0, wait forever)
+     *   - title: (optional) string - Title for the lock screen and notification
+     *   - artist: (optional) string - Artist for the lock screen and notification
+     *   - artwork: (optional) string - Artwork URL or file path for the lock screen and notification
      * Returns:
      *   - success: boolean - True if playback started
      * Events:
      *   - Fires "NativePHP\MediaPlayer\Events\PlaybackEnded" when playback finishes
      *   - Fires "NativePHP\MediaPlayer\Events\PlaybackError" on failure
+     *   - Fires "NativePHP\MediaPlayer\Events\RemoteCommand" when the user drives
+     *     playback from the lock screen, notification or headphones
      */
     class Play(private val activity: FragmentActivity) : BridgeFunction {
         override fun execute(parameters: Map<String, Any>): Map<String, Any> {
@@ -39,14 +46,29 @@ object MediaPlayerFunctions {
             val volume = (parameters["volume"] as? Number)?.toFloat() ?: 1.0f
             val rate = (parameters["rate"] as? Number)?.toFloat() ?: 1.0f
             val position = (parameters["position"] as? Number)?.toDouble() ?: 0.0
+            val title = parameters["title"] as? String
+            val artist = parameters["artist"] as? String
+            val artwork = parameters["artwork"] as? String
+            val timeout = (parameters["timeout"] as? Number)?.toDouble() ?: 0.0
 
             var success = false
             val latch = CountDownLatch(1)
 
-            // MediaPlayer setup must run on the main thread
+            // ExoPlayer and its media session must be built on the main thread
             Handler(Looper.getMainLooper()).post {
                 try {
-                    success = MediaPlayerManager.play(activity, source, loop, volume, rate, position)
+                    success = MediaPlayerManager.play(
+                        activity,
+                        source,
+                        loop,
+                        volume,
+                        rate,
+                        position,
+                        title,
+                        artist,
+                        artwork,
+                        timeout
+                    )
                 } catch (e: Exception) {
                     // Silent failure
                 }
