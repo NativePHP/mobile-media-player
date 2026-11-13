@@ -101,6 +101,7 @@
     },
     "events": [
         "NativePHP\\MediaPlayer\\Events\\PlaybackEnded",
-        "NativePHP\\MediaPlayer\\Events\\PlaybackError"
+        "NativePHP\\MediaPlayer\\Events\\PlaybackError",
+        "NativePHP\\MediaPlayer\\Events\\RemoteCommand"
     ]
 }
