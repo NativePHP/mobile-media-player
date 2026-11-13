@@ -133,7 +133,11 @@ describe('Plugin Manifest', function () {
             fn (string $dependency) => str_starts_with($dependency, 'androidx.media3:'),
         ));
 
+        // Headless playback runs on ExoPlayer, which only plays HLS (.m3u8)
+        // live streams with the HLS module; without it the media source
+        // factory is missing at runtime and play() throws.
         expect($media3)->toContain('androidx.media3:media3-session:1.5.1')
+            ->toContain('androidx.media3:media3-exoplayer-hls:1.5.1')
             ->and(array_unique(array_map(fn (string $dependency) => substr(strrchr($dependency, ':'), 1), $media3)))
             ->toHaveCount(1);
     });
