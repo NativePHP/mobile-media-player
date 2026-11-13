@@ -1,15 +1,22 @@
 package com.nativephp.plugins.media_player
 
+import android.app.PendingIntent
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.MediaPlayer
+import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
 import com.nativephp.mobile.utils.NativeActionCoordinator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,17 +31,24 @@ import java.lang.ref.WeakReference
  * `MediaPlayer.*` bridge functions and by the `video_player` element
  * renderer. Only one source plays at a time:
  *
- * - Headless playback runs through a plain android.media.MediaPlayer
- *   (no ExoPlayer/Media3 dependency).
+ * - Headless playback runs through a Media3 ExoPlayer, published to the
+ *   system through a MediaSession. That session is what puts playback on
+ *   the lock screen, in the notification shade and on headphone / Bluetooth
+ *   controls, and [MediaPlaybackService] keeps it alive in the background.
  * - Element playback (a Media3 Player owned by the `video_player`
  *   renderer) is "adopted" via [adoptElementPlayback], so facade calls
  *   (pause / resume / seek / volume / status) drive the on-screen surface
  *   too. Inside a paged container several surfaces coexist; only the one
- *   on the visible page is adopted at a time.
+ *   on the visible page is adopted at a time. Element playback gets no
+ *   media session: a muted feed video does not belong on the lock screen.
  *
- * Fires "NativePHP\MediaPlayer\Events\PlaybackEnded" / "...\PlaybackError"
- * through NativeActionCoordinator.dispatchEvent — the same event-dispatch
- * mechanism the microphone plugin uses for MicrophoneRecorded.
+ * All methods must be called on the main thread — ExoPlayer and
+ * MediaSession only answer on the looper they were created on.
+ *
+ * Fires "NativePHP\MediaPlayer\Events\PlaybackEnded" / "...\PlaybackError" /
+ * "...\RemoteCommand" through NativeActionCoordinator.dispatchEvent — the
+ * same event-dispatch mechanism the microphone plugin uses for
+ * MicrophoneRecorded.
  */
 object MediaPlayerManager {
 
@@ -42,8 +56,20 @@ object MediaPlayerManager {
 
     private const val PLAYBACK_ENDED_EVENT = "NativePHP\\MediaPlayer\\Events\\PlaybackEnded"
     private const val PLAYBACK_ERROR_EVENT = "NativePHP\\MediaPlayer\\Events\\PlaybackError"
+    private const val REMOTE_COMMAND_EVENT = "NativePHP\\MediaPlayer\\Events\\RemoteCommand"
 
-    private var headlessPlayer: MediaPlayer? = null
+    private const val SESSION_ID = "nativephp-media-player"
+
+    private var headlessPlayer: ExoPlayer? = null
+
+    /**
+     * The session that publishes [headlessPlayer] to the system. It wraps the
+     * player in a [RemoteCommandPlayer], so only commands that come from
+     * outside the app (lock screen, notification, headphones) go through
+     * the wrapper and are reported to PHP; facade calls drive the player
+     * directly and are not echoed back.
+     */
+    private var session: MediaSession? = null
 
     // Element playback adopted from the video_player renderer. Weak ref —
     // the Compose surface owns the player lifecycle, not us.
@@ -80,52 +106,93 @@ object MediaPlayerManager {
     /**
      * Start (or replace) headless playback of a file path or URL, from
      * [position] seconds in, at [rate] (1.0 = normal speed).
-     * Returns false when the player could not be created / prepared.
+     *
+     * [title], [artist] and [artwork] populate the system's media controls —
+     * the lock screen and the notification shade. [artwork] may be a remote
+     * URL or a local file path; Media3 loads it in the background, so
+     * playback never waits on it.
+     *
+     * Returns false when the player could not be created.
      */
-    fun play(activity: FragmentActivity, sourceToPlay: String, loop: Boolean, volume: Float, rate: Float = 1f, position: Double = 0.0): Boolean {
+    fun play(
+        activity: FragmentActivity,
+        sourceToPlay: String,
+        loop: Boolean,
+        volume: Float,
+        rate: Float = 1f,
+        position: Double = 0.0,
+        title: String? = null,
+        artist: String? = null,
+        artwork: String? = null
+    ): Boolean {
         release()
 
         activityRef = WeakReference(activity)
 
+        val context = activity.applicationContext
         val clamped = volume.coerceIn(0f, 1f)
-        val player = MediaPlayer()
+        this.rate = rate.coerceIn(0.25f, 4f)
 
         return try {
-            player.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .build()
-            )
-            setDataSource(player, activity, sourceToPlay)
-            player.isLooping = loop
-            player.setVolume(clamped, clamped)
-            this.rate = rate.coerceIn(0.25f, 4f)
-            player.setOnPreparedListener {
-                if (position > 0) {
-                    it.seekTo((position * 1000).toInt())
-                }
-                it.start()
-                applyRate(it)
+            val player = ExoPlayer.Builder(context)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    // Pause for a phone call or another app's audio, as a
+                    // media app is expected to.
+                    true
+                )
+                // Pause when headphones are unplugged rather than blare
+                // through the speaker.
+                .setHandleAudioBecomingNoisy(true)
+                // Keep the CPU and Wi-Fi awake for a stream while the screen
+                // is off.
+                .setWakeMode(C.WAKE_MODE_NETWORK)
+                .build()
+
+            val item = MediaItem.Builder()
+                .setUri(resolveUri(sourceToPlay))
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(title ?: "Live stream")
+                        .setArtist(artist)
+                        .setArtworkUri(artwork?.takeIf { it.isNotEmpty() }?.let { resolveUri(it) })
+                        .build()
+                )
+                .build()
+
+            // With no start position, a live stream starts at its live edge
+            // (the default position); passing 0 would start at the oldest
+            // segment still in the playlist.
+            if (position > 0) {
+                player.setMediaItem(item, (position * 1000).toLong())
+            } else {
+                player.setMediaItem(item)
             }
-            player.setOnCompletionListener { onPlaybackEnded(sourceToPlay) }
-            player.setOnErrorListener { _, what, extra ->
-                onPlaybackError(sourceToPlay, "MediaPlayer error what=$what extra=$extra")
-                true
-            }
-            player.prepareAsync()
+
+            player.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            player.volume = clamped
+            player.setPlaybackSpeed(this.rate)
+            player.addListener(HeadlessListener(sourceToPlay))
+            player.prepare()
+            player.playWhenReady = true
 
             headlessPlayer = player
             source = sourceToPlay
             state = "playing"
             stoppedByFacade = false
+
+            startSession(context, player)
+
             _adoptions.update { it + 1 }
 
             Log.d(TAG, "🎬 Playing $sourceToPlay (loop=$loop, volume=$clamped, rate=${this.rate}, position=$position)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to start playback: ${e.message}", e)
-            player.release()
+            releaseHeadless()
             onPlaybackError(sourceToPlay, e.message ?: "Failed to start playback")
             false
         }
@@ -137,7 +204,7 @@ object MediaPlayerManager {
         }
 
         try {
-            elementPlayer?.get()?.pause() ?: headlessPlayer?.pause()
+            activePlayer()?.pause()
             state = "paused"
         } catch (e: Exception) {
             Log.e(TAG, "❌ pause failed: ${e.message}")
@@ -146,20 +213,11 @@ object MediaPlayerManager {
 
     fun resume() {
         try {
-            val element = elementPlayer?.get()
-            if (element != null) {
-                if (state == "ended") {
-                    element.seekTo(0)
-                }
-                element.play()
-            } else {
-                val player = headlessPlayer ?: return
-                if (state == "ended") {
-                    player.seekTo(0)
-                }
-                player.start()
-                applyRate(player)
+            val player = activePlayer() ?: return
+            if (state == "ended") {
+                player.seekTo(0)
             }
+            player.play()
             state = "playing"
         } catch (e: Exception) {
             Log.e(TAG, "❌ resume failed: ${e.message}")
@@ -173,10 +231,10 @@ object MediaPlayerManager {
     }
 
     fun seek(seconds: Double) {
-        val ms = (seconds * 1000).toInt().coerceAtLeast(0)
+        val ms = (seconds * 1000).toLong().coerceAtLeast(0L)
 
         try {
-            elementPlayer?.get()?.seekTo(ms.toLong()) ?: headlessPlayer?.seekTo(ms)
+            activePlayer()?.seekTo(ms)
             if (state == "ended") {
                 state = "paused"
             }
@@ -186,15 +244,8 @@ object MediaPlayerManager {
     }
 
     fun setVolume(volume: Float) {
-        val clamped = volume.coerceIn(0f, 1f)
-
         try {
-            val element = elementPlayer?.get()
-            if (element != null) {
-                element.volume = clamped
-            } else {
-                headlessPlayer?.setVolume(clamped, clamped)
-            }
+            activePlayer()?.volume = volume.coerceIn(0f, 1f)
         } catch (e: Exception) {
             Log.e(TAG, "❌ setVolume failed: ${e.message}")
         }
@@ -202,34 +253,15 @@ object MediaPlayerManager {
 
     /**
      * Change how fast playback goes (1.0 = normal speed). A paused player
-     * stays paused and picks the speed up when it resumes.
+     * stays paused and keeps the speed for when it resumes.
      */
     fun setRate(rate: Float) {
         this.rate = rate.coerceIn(0.25f, 4f)
 
         try {
-            val element = elementPlayer?.get()
-            if (element != null) {
-                element.setPlaybackSpeed(this.rate)
-            } else if (state == "playing") {
-                headlessPlayer?.let { applyRate(it) }
-            }
+            activePlayer()?.setPlaybackSpeed(this.rate)
         } catch (e: Exception) {
             Log.e(TAG, "❌ setRate failed: ${e.message}")
-        }
-    }
-
-    /**
-     * Setting a speed on a prepared MediaPlayer also starts it, so this is
-     * only called on one that is playing.
-     */
-    private fun applyRate(player: MediaPlayer) {
-        try {
-            if (player.playbackParams.speed != rate) {
-                player.playbackParams = player.playbackParams.setSpeed(rate)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Could not set the playback speed: ${e.message}")
         }
     }
 
@@ -238,16 +270,10 @@ object MediaPlayerManager {
         var duration = 0.0
 
         try {
-            val element = elementPlayer?.get()
-            if (element != null) {
-                position = element.currentPosition.coerceAtLeast(0L) / 1000.0
-                val known = element.duration
+            activePlayer()?.let {
+                position = it.currentPosition.coerceAtLeast(0L) / 1000.0
+                val known = it.duration
                 duration = if (known == C.TIME_UNSET) 0.0 else known.coerceAtLeast(0L) / 1000.0
-            } else {
-                headlessPlayer?.let {
-                    position = it.currentPosition / 1000.0
-                    duration = it.duration.coerceAtLeast(0) / 1000.0
-                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ getStatus failed: ${e.message}")
@@ -259,6 +285,107 @@ object MediaPlayerManager {
             "duration" to duration,
             "source" to (source ?: "")
         )
+    }
+
+    /** The adopted surface if there is one, otherwise headless playback. */
+    private fun activePlayer(): Player? = elementPlayer?.get() ?: headlessPlayer
+
+    // MARK: - Media session
+
+    /** The session [MediaPlaybackService] hosts, or null when nothing plays headlessly. */
+    fun currentSession(): MediaSession? = session
+
+    private fun startSession(context: Context, player: ExoPlayer) {
+        val builder = MediaSession.Builder(context, RemoteCommandPlayer(player))
+            .setId(SESSION_ID)
+
+        // Tapping the notification brings the app back.
+        context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { launch ->
+            launch.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            builder.setSessionActivity(
+                PendingIntent.getActivity(
+                    context,
+                    0,
+                    launch,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            )
+        }
+
+        val newSession = builder.build()
+        session = newSession
+
+        MediaPlaybackService.attach(context, newSession)
+    }
+
+    private fun releaseSession() {
+        val current = session ?: return
+        session = null
+
+        val context = activityRef?.get()?.applicationContext
+        MediaPlaybackService.detach(context, current)
+        current.release()
+    }
+
+    /**
+     * Media3 hands commands from outside the app to the session's player.
+     * Wrapping the real player lets us tell those apart from facade calls,
+     * keep [state] in step and report them to PHP. As on iOS, the command
+     * has already been applied by the time PHP hears of it.
+     */
+    private class RemoteCommandPlayer(player: ExoPlayer) : ForwardingPlayer(player) {
+
+        override fun play() {
+            // A live buffer goes stale while paused. Rejoin the live edge
+            // instead of resuming behind it.
+            if (isCurrentMediaItemLive) {
+                seekToDefaultPosition()
+            }
+            super.play()
+            state = "playing"
+            dispatchRemoteCommand("play")
+        }
+
+        override fun pause() {
+            super.pause()
+            state = "paused"
+            dispatchRemoteCommand("pause")
+        }
+
+        override fun stop() {
+            dispatchRemoteCommand("stop")
+            // Releasing the session from inside its own callback is not
+            // safe, so let the call return first.
+            Handler(Looper.getMainLooper()).post { MediaPlayerManager.stop() }
+        }
+    }
+
+    /** Keeps [state] in step with headless playback and reports its outcome. */
+    private class HeadlessListener(private val listenedSource: String) : Player.Listener {
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            // Looping playback (REPEAT_MODE_ONE) never reaches STATE_ENDED.
+            if (playbackState == Player.STATE_ENDED) {
+                onPlaybackEnded(listenedSource)
+            }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            // Headphones unplugged, or another app took audio focus: the
+            // player paused on its own, so nothing told the manager.
+            if (!playWhenReady && state == "playing" && (
+                    reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY ||
+                        reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS
+                    )
+            ) {
+                state = "paused"
+                dispatchRemoteCommand("pause")
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            onPlaybackError(listenedSource, error.message ?: "Playback failed")
+        }
     }
 
     // MARK: - Element (video_player renderer) adoption
@@ -350,20 +477,13 @@ object MediaPlayerManager {
         }
     }
 
-    private fun setDataSource(player: MediaPlayer, context: Context, source: String) {
-        if (source.startsWith("/")) {
-            player.setDataSource(source)
-        } else {
-            player.setDataSource(context, Uri.parse(source))
-        }
-    }
-
+    /**
+     * Tear down headless playback: the session first (which takes the
+     * notification and lock screen controls away), then the player.
+     */
     private fun releaseHeadless() {
-        try {
-            headlessPlayer?.stop()
-        } catch (e: Exception) {
-            // Ignore — player may not have started yet
-        }
+        releaseSession()
+
         headlessPlayer?.release()
         headlessPlayer = null
     }
@@ -406,6 +526,16 @@ object MediaPlayerManager {
 
         Log.d(TAG, "📤 Dispatching PlaybackError with source=$errorSource, message=$message")
         dispatchEvent(PLAYBACK_ERROR_EVENT, payload)
+    }
+
+    private fun dispatchRemoteCommand(command: String) {
+        val payload = JSONObject().apply {
+            put("command", command)
+            put("source", source ?: "")
+        }
+
+        Log.d(TAG, "📤 Dispatching RemoteCommand $command")
+        dispatchEvent(REMOTE_COMMAND_EVENT, payload)
     }
 
     private fun dispatchEvent(event: String, payload: JSONObject) {
