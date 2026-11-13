@@ -54,6 +54,30 @@ $status = MediaPlayer::getStatus();
 `play()` and `present()` return `false` when the source can't be started (or when
 running outside the native runtime).
 
+#### Sources that never start
+
+Some sources never fail, they just load forever: a server that accepts the
+connection but sends no audio, or a format the device cannot decode. Pass a
+`timeout` to give up on them:
+
+```php
+MediaPlayer::play('https://example.com/stream', ['timeout' => 15]);
+```
+
+If no sound comes within that many seconds, the player is released, its
+status becomes `error` and a `PlaybackError` fires ("No sound after 15
+seconds."). Once sound has started, later rebuffering does not count. Without
+a `timeout` the player waits forever, as before.
+
+Formats are also checked per platform:
+
+- **iOS**: AVPlayer waits forever on an Ogg, Opus or WebM stream, even though
+  AVFoundation lists Ogg as playable. For an `http(s)` source the plugin reads
+  the server's `Content-Type` alongside playback and, for one of those types,
+  stops and fires a `PlaybackError` straight away, with or without a `timeout`.
+- **Android**: ExoPlayer reports a format it cannot parse itself, as a
+  `PlaybackError`. It plays Ogg (Vorbis, Opus, FLAC) streams.
+
 ### Now Playing (lock screen, Control Center, Dynamic Island, media notification)
 
 Pass `title`, `artist` and `artwork` to `play()` to populate the system's Now
@@ -230,7 +254,9 @@ public function handlePlaybackEnded(string $source)
 
 ### `PlaybackError`
 
-Fired when the shared player fails to load or play a source.
+Fired when the shared player fails to load or play a source, including a
+start that times out or a stream type the device cannot play (see
+[Sources that never start](#sources-that-never-start)).
 
 **Payload:** `string $source`, `string $message`
 

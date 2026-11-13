@@ -81,6 +81,26 @@ describe('play() metadata', function () {
             ->toHaveKey('title', 'Episode 12');
     });
 
+    it('sends a start timeout when one is given', function () {
+        (new MediaPlayer)->play('https://example.com/stream', ['timeout' => 15]);
+
+        $params = $this->bridge->callsTo('MediaPlayer.Play')[0]['params'];
+
+        expect($params)->toHaveKey('timeout', 15.0);
+    });
+
+    it('leaves the timeout out by default, so the player waits as before', function () {
+        (new MediaPlayer)->play('https://example.com/stream');
+
+        expect($this->bridge->callsTo('MediaPlayer.Play')[0]['params'])->not->toHaveKey('timeout');
+    });
+
+    it('never sends a negative timeout', function () {
+        (new MediaPlayer)->play('https://example.com/stream', ['timeout' => -5]);
+
+        expect($this->bridge->callsTo('MediaPlayer.Play')[0]['params'])->toHaveKey('timeout', 0.0);
+    });
+
     it('keeps a false loop, which array_filter must not strip', function () {
         (new MediaPlayer)->play('https://example.com/live.m3u8', ['loop' => false]);
 

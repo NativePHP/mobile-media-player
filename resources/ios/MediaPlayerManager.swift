@@ -54,6 +54,13 @@ final class MediaPlayerManager: NSObject {
     private var lastSource: String?
     private var lastLoop = false
     private var lastVolume: Float = 1.0
+    private var lastStartTimeout: Double = 0
+
+    // Start checks: AVPlayer never fails some sources, it just waits on them
+    // forever. These turn that silence into a PlaybackError.
+    private var startWatchdog: DispatchWorkItem?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var streamTypeProbe: StreamTypeProbe?
 
     private override init() {
         super.init()
@@ -74,7 +81,8 @@ final class MediaPlayerManager: NSObject {
         position: Double = 0,
         title: String? = nil,
         artist: String? = nil,
-        artwork: String? = nil
+        artwork: String? = nil,
+        startTimeout: Double = 0
     ) -> Bool {
         // Stash metadata before preparing, so the first now-playing publish
         // already carries it.
@@ -85,6 +93,7 @@ final class MediaPlayerManager: NSObject {
         lastSource = source
         lastLoop = loop
         lastVolume = max(0, min(1, volume))
+        lastStartTimeout = max(0, startTimeout)
 
         guard let player = preparePlayer(source: source, loop: loop, muted: false, autoplay: false) else {
             return false
@@ -105,6 +114,8 @@ final class MediaPlayerManager: NSObject {
         registerRemoteCommands()
         updateNowPlayingInfo()
         loadArtwork(from: artwork)
+
+        armStartChecks(player: player, source: source)
 
         return true
     }
@@ -258,7 +269,10 @@ final class MediaPlayerManager: NSObject {
         stoppedByFacade = true
         notifySlotChanged()
         updateNowPlayingInfo()
+        releaseAudioSession()
+    }
 
+    private func releaseAudioSession() {
         // Clearing nowPlayingInfo alone is not enough to dismiss the lock
         // screen card — iOS keeps showing a stale one, with dead transport
         // buttons, until the audio session is released. Deactivating also
@@ -533,7 +547,8 @@ final class MediaPlayerManager: NSObject {
             volume: lastVolume,
             rate: rate,
             title: nowPlayingTitle,
-            artist: nowPlayingArtist
+            artist: nowPlayingArtist,
+            startTimeout: lastStartTimeout
         )
     }
 
@@ -695,7 +710,87 @@ final class MediaPlayerManager: NSObject {
         LaravelBridge.shared.send?("NativePHP\\MediaPlayer\\Events\\PlaybackError", payload)
     }
 
+    // MARK: - Start checks
+
+    /// Stream types AVPlayer accepts but never starts. AVFoundation reports
+    /// Ogg as playable (`isPlayableExtendedMIMEType` says yes), yet an Ogg
+    /// stream (an Icecast Ogg FLAC station, for one) sits loading forever on
+    /// a device, with no error and no item failure.
+    private static let unplayableStreamTypes: Set<String> = [
+        "application/ogg",
+        "audio/ogg",
+        "audio/opus",
+        "audio/webm",
+        "video/webm",
+    ]
+
+    /// Watch a freshly started headless source for the two silent failures:
+    /// a stream type AVPlayer cannot start (checked against the response's
+    /// Content-Type, alongside playback so a good stream never waits), and,
+    /// when a start timeout is set, no sound at all within it.
+    private func armStartChecks(player: AVPlayer, source: String) {
+        // play() may restart the source already held, without a teardown.
+        disarmStartChecks()
+        streamTypeProbe?.cancel()
+        streamTypeProbe = nil
+
+        if let url = Self.resolveURL(source), url.scheme == "http" || url.scheme == "https" {
+            streamTypeProbe = StreamTypeProbe(url: url) { [weak self] mimeType in
+                guard let self = self, self.source == source, let mimeType = mimeType else { return }
+
+                if Self.unplayableStreamTypes.contains(mimeType) {
+                    self.failStart(source: source, message: "This device cannot play \(mimeType) streams.")
+                }
+            }
+        }
+
+        guard lastStartTimeout > 0 else { return }
+
+        let seconds = lastStartTimeout
+
+        // Sound has started once the player's clock runs; a later stall is
+        // rebuffering, not a failed start, so the watchdog stands down.
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            if player.timeControlStatus == .playing {
+                DispatchQueue.main.async { self?.disarmStartChecks() }
+            }
+        }
+
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self = self, self.source == source, self.state == "playing" else { return }
+            self.failStart(source: source, message: "No sound after \(Self.formatSeconds(seconds)) seconds.")
+        }
+        startWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: watchdog)
+    }
+
+    private func disarmStartChecks() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+    }
+
+    /// Give up on a source that will never play: release it as `stop()`
+    /// would, but leave the state at "error" and say why.
+    private func failStart(source: String, message: String) {
+        teardown()
+        state = "error"
+        notifySlotChanged()
+        updateNowPlayingInfo()
+        releaseAudioSession()
+        dispatchError(source: source, message: message)
+    }
+
+    private static func formatSeconds(_ seconds: Double) -> String {
+        seconds.rounded() == seconds ? String(Int(seconds)) : String(seconds)
+    }
+
     private func teardown() {
+        disarmStartChecks()
+        streamTypeProbe?.cancel()
+        streamTypeProbe = nil
+
         if let endObserver = endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
@@ -715,5 +810,51 @@ final class MediaPlayerManager: NSObject {
         source = nil
         shouldLoop = false
         ownsPlayer = true
+    }
+}
+
+/// Reads the Content-Type a server sends for a URL and hangs up: a live
+/// stream never ends, so only the response headers are fetched.
+private final class StreamTypeProbe: NSObject, URLSessionDataDelegate {
+    private var session: URLSession?
+    private var completion: ((String?) -> Void)?
+
+    init(url: URL, completion: @escaping (String?) -> Void) {
+        self.completion = completion
+        super.init()
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+        self.session = session
+        session.dataTask(with: url).resume()
+    }
+
+    func cancel() {
+        completion = nil
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        completionHandler(.cancel)
+        finish(response.mimeType?.lowercased())
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // Unreachable or refused: say nothing, the start timeout covers it.
+        finish(nil)
+    }
+
+    private func finish(_ mimeType: String?) {
+        let completion = self.completion
+        cancel()
+        completion?(mimeType)
     }
 }

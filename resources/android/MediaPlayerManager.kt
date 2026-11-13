@@ -101,6 +101,12 @@ object MediaPlayerManager {
     @Volatile
     private var rate: Float = 1f
 
+    // Fails a headless start that has produced no sound within the timeout
+    // passed to play(). ExoPlayer reports formats it cannot parse, but a
+    // stalled or silent server leaves it buffering forever.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var startWatchdog: Runnable? = null
+
     // MARK: - Playback control
 
     /**
@@ -123,7 +129,8 @@ object MediaPlayerManager {
         position: Double = 0.0,
         title: String? = null,
         artist: String? = null,
-        artwork: String? = null
+        artwork: String? = null,
+        startTimeout: Double = 0.0
     ): Boolean {
         release()
 
@@ -185,6 +192,7 @@ object MediaPlayerManager {
             stoppedByFacade = false
 
             startSession(context, player)
+            armStartWatchdog(player, sourceToPlay, startTimeout)
 
             _adoptions.update { it + 1 }
 
@@ -383,10 +391,52 @@ object MediaPlayerManager {
             }
         }
 
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            // Sound has started; a later stall is rebuffering, not a failed start.
+            if (isPlaying) {
+                disarmStartWatchdog()
+            }
+        }
+
         override fun onPlayerError(error: PlaybackException) {
+            disarmStartWatchdog()
             onPlaybackError(listenedSource, error.message ?: "Playback failed")
         }
     }
+
+    // MARK: - Start watchdog
+
+    private fun armStartWatchdog(player: ExoPlayer, watchedSource: String, seconds: Double) {
+        disarmStartWatchdog()
+
+        if (seconds <= 0) {
+            return
+        }
+
+        val watchdog = Runnable {
+            startWatchdog = null
+
+            // Only a start that is still meant to be playing has failed; a
+            // pause before the first sound is the user's choice.
+            if (headlessPlayer !== player || state != "playing") {
+                return@Runnable
+            }
+
+            release()
+            onPlaybackError(watchedSource, "No sound after ${formatSeconds(seconds)} seconds.")
+        }
+
+        startWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, (seconds * 1000).toLong())
+    }
+
+    private fun disarmStartWatchdog() {
+        startWatchdog?.let { mainHandler.removeCallbacks(it) }
+        startWatchdog = null
+    }
+
+    private fun formatSeconds(seconds: Double): String =
+        if (seconds % 1.0 == 0.0) seconds.toLong().toString() else seconds.toString()
 
     // MARK: - Element (video_player renderer) adoption
 
@@ -482,6 +532,7 @@ object MediaPlayerManager {
      * notification and lock screen controls away), then the player.
      */
     private fun releaseHeadless() {
+        disarmStartWatchdog()
         releaseSession()
 
         headlessPlayer?.release()

@@ -183,6 +183,32 @@ describe('Native Code', function () {
     });
 });
 
+describe('Start checks', function () {
+    it('passes the start timeout through to both platforms', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerFunctions.swift');
+        $kotlin = file_get_contents($this->pluginPath.'/resources/android/MediaPlayerFunctions.kt');
+
+        expect($swift)->toContain('parameters["timeout"]')->toContain('startTimeout: timeout');
+        expect($kotlin)->toContain('parameters["timeout"]');
+    });
+
+    it('refuses the stream types AVPlayer never starts on iOS', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerManager.swift');
+
+        foreach (['application/ogg', 'audio/ogg', 'audio/opus', 'audio/webm'] as $type) {
+            expect($swift)->toContain('"'.$type.'"');
+        }
+    });
+
+    it('stands the watchdog down once sound starts on both platforms', function () {
+        $swift = file_get_contents($this->pluginPath.'/resources/ios/MediaPlayerManager.swift');
+        $kotlin = file_get_contents($this->pluginPath.'/resources/android/MediaPlayerManager.kt');
+
+        expect($swift)->toContain('timeControlStatus == .playing');
+        expect($kotlin)->toContain('override fun onIsPlayingChanged');
+    });
+});
+
 describe('PHP Classes', function () {
     it('has service provider', function () {
         $file = $this->pluginPath.'/src/MediaPlayerServiceProvider.php';

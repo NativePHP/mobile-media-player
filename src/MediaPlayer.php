@@ -14,7 +14,12 @@ class MediaPlayer
      * file path; remote artwork is fetched in the background and applied when
      * it arrives, so playback never waits on it.
      *
-     * @param  array{loop?: bool, volume?: float, rate?: float, position?: float, title?: string, artist?: string, artwork?: string}  $options
+     * `timeout` is how many seconds to wait for sound before giving up: the
+     * player is released and a PlaybackError fires. Without it a source that
+     * never starts (a dead server, a format the device cannot decode) keeps
+     * the player loading forever.
+     *
+     * @param  array{loop?: bool, volume?: float, rate?: float, position?: float, timeout?: float, title?: string, artist?: string, artwork?: string}  $options
      */
     public function play(string $source, array $options = []): bool
     {
@@ -25,6 +30,7 @@ class MediaPlayer
                 'volume' => (float) ($options['volume'] ?? 1.0),
                 'rate' => (float) ($options['rate'] ?? 1.0),
                 'position' => max(0.0, (float) ($options['position'] ?? 0.0)),
+                'timeout' => isset($options['timeout']) ? max(0.0, (float) $options['timeout']) : null,
                 'title' => $options['title'] ?? null,
                 'artist' => $options['artist'] ?? null,
                 'artwork' => $options['artwork'] ?? null,

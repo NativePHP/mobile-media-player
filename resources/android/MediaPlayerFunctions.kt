@@ -22,6 +22,8 @@ object MediaPlayerFunctions {
      *   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
      *   - rate: (optional) float - How fast it plays, 1.0 being normal speed (default: 1.0)
      *   - position: (optional) float - Seconds in to start from (default: 0)
+     *   - timeout: (optional) float - Seconds to wait for sound before giving up
+     *     with a PlaybackError (default: 0, wait forever)
      *   - title: (optional) string - Title for the lock screen and notification
      *   - artist: (optional) string - Artist for the lock screen and notification
      *   - artwork: (optional) string - Artwork URL or file path for the lock screen and notification
@@ -47,6 +49,7 @@ object MediaPlayerFunctions {
             val title = parameters["title"] as? String
             val artist = parameters["artist"] as? String
             val artwork = parameters["artwork"] as? String
+            val timeout = (parameters["timeout"] as? Number)?.toDouble() ?: 0.0
 
             var success = false
             val latch = CountDownLatch(1)
@@ -63,7 +66,8 @@ object MediaPlayerFunctions {
                         position,
                         title,
                         artist,
-                        artwork
+                        artwork,
+                        timeout
                     )
                 } catch (e: Exception) {
                     // Silent failure
